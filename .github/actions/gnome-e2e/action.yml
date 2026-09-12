@@ -392,6 +392,7 @@ runs:
         python3 - <<'PYEOF'
         import json, os, sys
         from pathlib import Path
+        from scripts.e2e_summary import count_scenarios, is_success, summary_icon
 
         results_file = Path("results/results.json")
         timings_file = Path("results/timings.jsonl")
@@ -403,18 +404,25 @@ runs:
 
         data = json.loads(results_file.read_text())
 
-        passed = failed = skipped = 0
+        # Single source of truth is scripts/e2e_summary.py. The headline is
+        # gated on is_success (not `failed == 0`), so an undefined/untested/
+        # errored run never renders a green headline — issue #797.
+        counts = count_scenarios(data)
+        passed    = counts["passed"]
+        failed    = counts["failed"]
+        skipped   = counts["skipped"]
+        undefined = counts["undefined"]
+        untested  = counts["untested"]
+        other     = counts["other"]
+        total     = sum(counts.values())
+        status_word = "PASSED" if is_success(counts) else "FAILED"
         failures = []
         for feature in data:
             feature_name = feature.get("name", "unknown feature")
             for element in feature.get("elements", []):
                 if element.get("type") == "background":
                     continue
-                status = element.get("status", "")
-                if status == "passed":
-                    passed += 1
-                elif status == "failed":
-                    failed += 1
+                if element.get("status") == "failed":
                     scenario_name = element.get("name", "")
                     failed_step = error_msg = ""
                     for step in element.get("steps", []):
@@ -424,8 +432,6 @@ runs:
                             error_msg  = result.get("error_message", "")
                             break
                     failures.append((feature_name, scenario_name, failed_step, error_msg))
-                elif status == "skipped":
-                    skipped += 1
 
         sla_violations = []
         if timings_file.exists():
@@ -438,8 +444,6 @@ runs:
                     pass
 
         # ── Compact summary in CI log ──────────────────────────────────────
-        total       = passed + failed + skipped
-        status_word = "PASSED" if failed == 0 else "FAILED"
         sep = "=" * 64
         print(f"\n{sep}", flush=True)
         print(f"E2E {status_word}: {passed} passed / {failed} failed / {skipped} skipped (total {total})", flush=True)
@@ -466,12 +470,12 @@ runs:
         if not summary_file:
             sys.exit(0)
 
-        icon  = "✅" if failed == 0 else "❌"
+        icon  = summary_icon(counts)
         lines = [f"## {icon} E2E Results — `{suite}`", ""]
         lines += [
-            "| ✅ Passed | ❌ Failed | ⏭️ Skipped | Total |",
-            "|----------|----------|-----------|-------|",
-            f"| {passed} | **{failed}** | {skipped} | {total} |",
+            "| ✅ Passed | ❌ Failed | ⏭️ Skipped | ⚠️ Undefined | ⚪ Untested | 🛑 Error/other | Total |",
+            "|----------|----------|-----------|--------------|-------------|-------------------|-------|",
+            f"| {passed} | **{failed}** | {skipped} | {undefined} | {untested} | {other} | {total} |",
             "",
         ]
 

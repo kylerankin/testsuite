@@ -1,6 +1,10 @@
 """Unit tests for e2e job-summary result counting."""
 
+from pathlib import Path
+
 from scripts.e2e_summary import count_scenarios, is_success, summary_icon
+
+_ACTION_YML = Path(".github/actions/gnome-e2e/action.yml")
 
 
 def _report(*statuses, element_type="scenario"):
@@ -110,3 +114,28 @@ def test_skipped_only_and_empty_runs_stay_green():
 
     assert summary_icon(counts) == "✅"
     assert summary_icon(count_scenarios([])) == "✅"
+
+
+def test_action_summary_step_uses_shared_module():
+    """The action's ``Summarise results`` step must consume
+    ``scripts/e2e_summary.py`` rather than re-implement the counting, or the
+    copy under test stops being the copy that runs (issue #797)."""
+    action_text = _ACTION_YML.read_text()
+
+    assert "from scripts.e2e_summary import" in action_text
+    for name in ("count_scenarios", "is_success", "summary_icon"):
+        assert name in action_text, f"action step does not use {name}"
+
+
+def test_action_summary_step_headline_not_gated_on_failed_eq_zero():
+    """The shipped step must not render a green headline from ``failed == 0``
+    alone — that is exactly the undefined/untested/errored false-pass of
+    issue #797."""
+    action_text = _ACTION_YML.read_text()
+
+    # The CI-log status word and the job-summary icon are now derived from the
+    # shared module, not from a local ``failed == 0`` comparison.
+    assert "\"PASSED\" if failed == 0" not in action_text
+    assert "'✅' if failed == 0" not in action_text
+    assert '"✅" if failed == 0' not in action_text
+
