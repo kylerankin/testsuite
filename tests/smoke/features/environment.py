@@ -14,6 +14,8 @@ import os
 import sys
 import traceback
 
+from tests.shared.results_dir import resolve_results_dir
+
 import re as _re
 import subprocess as _subprocess
 
@@ -654,7 +656,9 @@ def after_all(context) -> None:
 
     try:
         import os
-        if os.path.exists("/tmp/results/atspi_tree.txt"):
+        results_dir = resolve_results_dir(context)
+        atspi_path = os.path.join(results_dir, "atspi_tree.txt")
+        if os.path.exists(atspi_path):
             return  # already written by after_scenario
         shell = context.sandbox.shell
         lines = []
@@ -662,8 +666,8 @@ def after_all(context) -> None:
             lines.append(f"role={child.roleName!r:30} name={child.name!r}")
             for gc in child.children[:20]:
                 lines.append(f"  role={gc.roleName!r:30} name={gc.name!r}")
-        os.makedirs("/tmp/results", exist_ok=True)
-        with open("/tmp/results/atspi_tree.txt", "w") as f:
+        os.makedirs(results_dir, exist_ok=True)
+        with open(atspi_path, "w") as f:
             f.write("\n".join(lines))
     except Exception:   # noqa: BLE001
         pass
