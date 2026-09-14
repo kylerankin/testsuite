@@ -14,9 +14,6 @@ import os
 import sys
 import traceback
 
-from tests.shared.results_dir import resolve_results_dir
-
-import re as _re
 import subprocess as _subprocess
 
 try:
@@ -280,6 +277,16 @@ try:
 except Exception as exc:  # noqa: BLE001
     print(f"WARNING: screenshot steps unavailable: {exc}", flush=True)
 
+
+try:
+    from tests.shared.results_dir import resolve_results_dir
+except Exception as exc:  # noqa: BLE001
+    # results_dir.py only imports os/typing, so this never fires in CI — but
+    # the surrounding tests.shared imports degrade instead of aborting the
+    # suite, so keep that behaviour: fall back to the default results dir.
+    def resolve_results_dir(context=None):
+        from tests.shared.results_dir import DEFAULT_RESULTS_DIR
+        return os.environ.get("TESTSUITE_RESULTS_DIR", DEFAULT_RESULTS_DIR)
 
 SUITE_NAME = "smoke"
 
