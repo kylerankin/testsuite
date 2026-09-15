@@ -64,7 +64,7 @@ def report_shell_version(context) -> None:
     """
     # ponytail: informational canary — never raise, only warn, so a pre-flip
     # gnomeos-51 image reporting a new version still passes the suite.
-    from tests.shared.gnome_shell_steps import _IN_CONTAINER
+    from tests.shared.gnome_shell_steps import _IN_CONTAINER, _ssh_run
 
     gdbus_get = [
         'gdbus', 'get', '--session',
@@ -73,21 +73,22 @@ def report_shell_version(context) -> None:
         '--interface', 'org.gnome.Shell',
         'ShellVersion',
     ]
+    version = ""
     try:
         if _IN_CONTAINER:
-            out = _ssh_run("source /tmp/session.env 2>/dev/null; " + " ".join(gdbus_get), timeout=15)
+            raw = _ssh_run("source /tmp/session.env 2>/dev/null; " + " ".join(gdbus_get), timeout=15)
+            version = (raw or "").strip()
         else:
             out = subprocess.run(gdbus_get, capture_output=True, text=True, timeout=15)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            version = (out.stdout or "").strip()
+            if out.returncode != 0:
+                detail = (out.stderr or out.stdout or "").strip()
+                print(f"WARNING: gdbus returned {out.returncode} reading ShellVersion: {detail}", flush=True)
+    except Exception as exc:
         print(f"WARNING: could not read ShellVersion: {exc}", flush=True)
         return
 
-    version = (out.stdout or "").strip()
     print(f"GNOME Shell ShellVersion: {version or '<unreadable>'}", flush=True)
-    if out.returncode != 0:
-        detail = (out.stderr or out.stdout or "").strip()
-        print(f"WARNING: gdbus returned {out.returncode} reading ShellVersion: {detail}", flush=True)
-
 
 @step('No coredump entries exist for "{name}"')
 def no_coredump_entries_exist(context, name: str) -> None:

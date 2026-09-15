@@ -84,14 +84,31 @@ To record the running GNOME Shell version for version-readiness tracking
 ```python
 # ponytail: informational canary — never raise, only warn, so a pre-flip
 # gnomeos-51 image reporting a new version still passes the suite.
-gdbus_get = ['gdbus', 'get', '--session', '--dest', 'org.gnome.Shell',
-             '--object-path', '/org/gnome/Shell',
-             '--interface', 'org.gnome.Shell', 'ShellVersion']
-if _IN_CONTAINER:
-    out = _ssh_run("source /tmp/session.env 2>/dev/null; " + " ".join(gdbus_get))
-else:
-    out = subprocess.run(gdbus_get, capture_output=True, text=True, timeout=15)
-print(f"GNOME Shell ShellVersion: {(out.stdout or '').strip() or '<unreadable>'}")
+from tests.shared.gnome_shell_steps import _IN_CONTAINER, _ssh_run
+
+gdbus_get = [
+    'gdbus', 'get', '--session',
+    '--dest', 'org.gnome.Shell',
+    '--object-path', '/org/gnome/Shell',
+    '--interface', 'org.gnome.Shell',
+    'ShellVersion',
+]
+version = ""
+try:
+    if _IN_CONTAINER:
+        raw = _ssh_run("source /tmp/session.env 2>/dev/null; " + " ".join(gdbus_get), timeout=15)
+        version = (raw or "").strip()
+    else:
+        out = subprocess.run(gdbus_get, capture_output=True, text=True, timeout=15)
+        version = (out.stdout or "").strip()
+        if out.returncode != 0:
+            detail = (out.stderr or out.stdout or "").strip()
+            print(f"WARNING: gdbus returned {out.returncode} reading ShellVersion: {detail}", flush=True)
+except Exception as exc:
+    print(f"WARNING: could not read ShellVersion: {exc}", flush=True)
+    return
+
+print(f"GNOME Shell ShellVersion: {version or '<unreadable>'}", flush=True)
 ```
 
 Tag the scenario `@informational` so it runs and reports but never gates
@@ -459,6 +476,25 @@ The pattern `for _ in range(N): ... sleep(X)` that returns early already IS exit
 - "A direct command launch is simpler." → For GUI apps, desktop-file activation is usually more reliable for AT-SPI registration.
 - "I'll just sleep after launch." → Poll for the visible window instead; fixed sleeps bloat the suite and still flake.
 - "This title match is good enough." → Prefer app-level AT-SPI lookup first, then use title fallback only when the app name is unstable.
+
+## Red Flags
+
+
+- New smoke app steps hardcode `/usr/share/applications/...` for Flatpak-only apps
+- Step code uses `findChild(..., requireResult=...)`
+- New GNOME steps duplicate existing step phrases in the suite
+- New launch steps add unconditional post-launch sleeps instead of relying on accessibility polling
+
+## Verification
+
+
+- [ ] Reused existing GNOME/smoke helpers before adding new ones
+- [ ] Launch targets prefer desktop files, with Flatpak or command fallback only when needed
+- [ ] AT-SPI polling or Shell.Eval assertions replace fixed waits where possible
+- [ ] `python3 -m py_compile tests/<suite>/features/steps/*.py` passes
+- [ ] `grep -h "^@step" tests/<suite>/features/steps/*.py | sort | uniq -d` returns no duplicates
+- [ ] `ruff check tests/ --select E,F,W --ignore E501` passes
+- [ ] `behave --dry-run tests/<suite>/features/` passes for the touched suite
 
 ## Session readiness across a GDM restart
 
