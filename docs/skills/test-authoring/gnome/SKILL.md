@@ -73,6 +73,31 @@ cmd = "source /tmp/session.env 2>/dev/null; gdbus call --session --dest org.gnom
 _run_host(cmd)
 ```
 
+## Reading a static D-Bus property (ShellVersion canary)
+
+To record the running GNOME Shell version for version-readiness tracking
+(GNOME 51, issue #826), read the static `org.gnome.Shell` property
+`ShellVersion` directly — it is **not** a Shell JS expression, so do not use
+`Shell.Eval`. Route through SSH inside the runner container like the
+`Shell.Eval` helpers:
+
+```python
+# ponytail: informational canary — never raise, only warn, so a pre-flip
+# gnomeos-51 image reporting a new version still passes the suite.
+gdbus_get = ['gdbus', 'get', '--session', '--dest', 'org.gnome.Shell',
+             '--object-path', '/org/gnome/Shell',
+             '--interface', 'org.gnome.Shell', 'ShellVersion']
+if _IN_CONTAINER:
+    out = _ssh_run("source /tmp/session.env 2>/dev/null; " + " ".join(gdbus_get))
+else:
+    out = subprocess.run(gdbus_get, capture_output=True, text=True, timeout=15)
+print(f"GNOME Shell ShellVersion: {(out.stdout or '').strip() or '<unreadable>'}")
+```
+
+Tag the scenario `@informational` so it runs and reports but never gates
+promotion. See `tests/vanilla-gnome/features/steps/steps.py` for the landing
+step and `gnome_core.feature` for the scenario.
+
 ## Remote session commands from the runner container
 
 Commands that access the GNOME user session, including `gsettings`, `gdbus
@@ -434,25 +459,6 @@ The pattern `for _ in range(N): ... sleep(X)` that returns early already IS exit
 - "A direct command launch is simpler." → For GUI apps, desktop-file activation is usually more reliable for AT-SPI registration.
 - "I'll just sleep after launch." → Poll for the visible window instead; fixed sleeps bloat the suite and still flake.
 - "This title match is good enough." → Prefer app-level AT-SPI lookup first, then use title fallback only when the app name is unstable.
-
-## Red Flags
-
-
-- New smoke app steps hardcode `/usr/share/applications/...` for Flatpak-only apps
-- Step code uses `findChild(..., requireResult=...)`
-- New GNOME steps duplicate existing step phrases in the suite
-- New launch steps add unconditional post-launch sleeps instead of relying on accessibility polling
-
-## Verification
-
-
-- [ ] Reused existing GNOME/smoke helpers before adding new ones
-- [ ] Launch targets prefer desktop files, with Flatpak or command fallback only when needed
-- [ ] AT-SPI polling or Shell.Eval assertions replace fixed waits where possible
-- [ ] `python3 -m py_compile tests/<suite>/features/steps/*.py` passes
-- [ ] `grep -h "^@step" tests/<suite>/features/steps/*.py | sort | uniq -d` returns no duplicates
-- [ ] `ruff check tests/ --select E,F,W --ignore E501` passes
-- [ ] `behave --dry-run tests/<suite>/features/` passes for the touched suite
 
 ## Session readiness across a GDM restart
 
