@@ -1,7 +1,7 @@
 ---
 name: gnome
-version: "1.0"
-last_updated: "2026-07-29"
+version: "1.1"
+last_updated: "2026-09-16"
 id: gnome
 one_line_purpose: Write GNOME Shell, AT-SPI, and dogtail interaction tests.
 entry_point: docs/skills/test-authoring/gnome/SKILL.md
@@ -9,7 +9,7 @@ category: test-authoring
 mcp_compliance_level: partial
 status: active
 dependencies: []
-tags: [gnome, atspi, dogtail]
+tags: [gnome, atspi, dogtail, gnome-51]
 description: "How to write GNOME Shell / AT-SPI / dogtail tests for the testsuite repo. Load when editing GNOME interaction steps."
 metadata:
   type: pattern
@@ -72,6 +72,29 @@ _run_host(cmd)
 cmd = "source /tmp/session.env 2>/dev/null; gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.SetActive false"
 _run_host(cmd)
 ```
+
+## GNOME 51 workarounds audit (issue #827)
+
+GNOME 51 (GA 2026-09-16) is Wayland-only, drops legacy NVIDIA paths, and freezes
+the extension API. This repo carries ~60 GNOME 50-specific workarounds that were
+never validated against 51. **Do not assume any of them still hold on 51, and
+do not remove any yet** — Bluefin ships GNOME 50 until its own rebase.
+
+The full per-workaround inventory, with where each lives and the GNOME 51 fact
+that bears on it, lives in
+[`references/gnome-51-audit.md`](references/gnome-51-audit.md). Its status
+column is deliberately `UNVALIDATED`: the only way to classify a workaround as
+`still required` / `broken on 51` / `obsolete` is to run it on a `gnomeos-51`
+image via `manual.yml` (lab infra, not available in this environment).
+
+Ground rules while auditing:
+- Keep every GNOME 50 workaround until a 51 run proves it is obsolete.
+- Version-branch only where behavior genuinely diverges; never delete on a guess.
+- Frozen-API workarounds (`Shell.Eval`, `GetExtensionInfo`, `org.gnome.ScreenSaver`,
+  `org.freedesktop.Notifications`) are the least likely to break; AT-SPI role /
+  name workarounds (panel `showing=False`, Nautilus, Ptyxis, `filler`) are the
+  most likely and should be validated first.
+- Do not claim qecore GNOME 51 support until PR #821 (qecore pins) lands.
 
 ## Remote session commands from the runner container
 
@@ -492,3 +515,4 @@ Load these when you hit the specific topic:
 - [Top-bar interactions and Shell.Eval parsing on GNOME 50+.](references/top-bar.md)
 - [MIME, display, and session configuration in containerized tests.](references/display-config.md)
 - [Deep dive: Preinstalled Flatpak desktop app launch checks](references/preinstalled-flatpak-desktop-app-launch-checks.md)
+- [GNOME 50 workaround audit against GNOME 51 (issue #827)](references/gnome-51-audit.md)
