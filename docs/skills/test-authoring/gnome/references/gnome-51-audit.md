@@ -71,6 +71,9 @@ published fact suggests it may change.
   4.16 → 4.19.3) lands. GNOME 50 needed qecore ≥ 4.12; 51 needs the pinned
   4.19.3.
 - The `vanilla-gnome` suite already carries an informational `ShellVersion`
-  canary (`@informational @version-canary`) that prints the running Shell
-  version so the flip is visible before it reads as a regression. See
+  canary — the `GNOME Shell version is reported` step inside the `@gnome_core`
+  "GNOME Shell process is running and accessible via AT-SPI" scenario in
+  `gnome_core.feature` (landed in #864). It prints the running Shell version so
+  the flip is visible before it reads as a regression, and it warns rather than
+  raises on every failure path, so it cannot gate the run. See
   `docs/skills/ci-ops/ops/references/fedora-version-targets.md`.
