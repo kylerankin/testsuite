@@ -220,7 +220,7 @@ The same rule applies to every other non-cone checkout in this repo, including t
 18. **Load runner container into VM** — non-common suites; ensures `bluefin-test` has `/etc/subuid`/`/etc/subgid`, runs `podman system migrate`, pipes `ghcr.io/<image-org>/testsuite:runner` via `podman save | ssh podman load`; patches `openssh-clients` into the runner image if missing
 19. **Install Python test stack** — non-common suites; loads `uinput` kernel module, sets device permissions, copies SSH private key into VM for `@plain_ssh` scenarios, queries GNOME session environment into `/tmp/session.env`, enables `unsafe-mode@bluefin-test` extension, sets `toolkit-accessibility true`, disables idle locking for the disposable test user, re-queries AT-SPI bus address after enabling accessibility, terminates any pre-started `gnome-control-center`
 20. **Install gnome-ponytail-daemon** — non-common suites; builds `gnome-ponytail-daemon` (tag `0.0.11`) and `grim` from source inside a `debian:bookworm` container on the runner (without libei, uses Mutter D-Bus fallback for input events; wayland-protocols 1.37 built from source for grim); SCPs binaries into `~/.local/libexec/` and `~/.local/bin/`; registers D-Bus service file and pre-starts the daemon
-21. **Run behave suite** — `common`/`lifecycle`/`installer`: runner-side `python3 tests/shared/behave_retry.py` with `VM_IP/VM_USER/SSH_KEY/SSH_PORT` env vars (this fixed list is the whole environment those suites get — a scenario gated on any other variable can never run; see [installer-suite.md](references/installer-suite.md)); GUI suites: SCP `tests/<suite>` + `tests/shared` + `tests/__init__.py` to VM, then `podman run ... ghcr.io/<image-org>/testsuite:runner "python3 .../behave_retry.py ... --format json.pretty"` inside VM; always `--tags ~quarantine`; retries controlled by `BEHAVE_RETRIES=2`
+21. **Run behave suite** — `common`/`lifecycle`/`installer`: runner-side `python3 tests/shared/behave_retry.py` with `VM_IP/VM_USER/SSH_KEY/SSH_PORT` env vars (this fixed list is the whole environment those suites get — a scenario gated on any other variable can never run; see [installer-suite.md](references/installer-suite.md)). The migration lane additionally receives `MIGRATION_TARGET` and `EXTRA_TAGS` from the two `migration-target`/`extra-tags` inputs below; `EXTRA_TAGS` is appended to `BEHAVE_TAG_ARGS` as `--tags <value>` so a dispatch can scope the lifecycle run to just `@migration`. GUI suites: SCP `tests/<suite>` + `tests/shared` + `tests/__init__.py` to VM, then `podman run ... ghcr.io/<image-org>/testsuite:runner "python3 .../behave_retry.py ... --format json.pretty"` inside VM; always `--tags ~quarantine`; retries controlled by `BEHAVE_RETRIES=2`
 22. **Capture post-upgrade desktop screenshot** — lifecycle suite only; SSHes with `ControlMaster=no`, waits up to 60 s for Wayland socket, captures via `gdbus org.gnome.Shell.Eval`
 23. **Capture post-migration screenshot and status** — lifecycle suite only; QEMU framebuffer capture via `qemu_screendump.py` + SSH for `bootc status`, `fastfetch`, `os-release` into `results/migration-status.txt`
 24. **Capture Flatpak screenshots** — when `inputs.screenshot_flatpaks != ''`; runs `screenshot_cli.py` inside the runner container
@@ -344,6 +344,33 @@ migration-test:
 ```
 
 For non-migration lifecycle runs: dispatch `upgrade-test.yml` in `<image-org>/actions`.
+
+### `e2e.yml` migration inputs: `migration-target` and `extra-tags`
+
+`migration-test.yml` calls `e2e.yml` and passes two inputs that `e2e.yml` must
+declare or GitHub rejects the `workflow_call` at startup (`startup_failure`, zero
+jobs) — this is exactly what broke the `@migration` lane from 2026-06-04 onward
+when a stale-branch merge dropped the declarations but left the caller intact.
+
+| `e2e.yml` input | Passed as | Effect |
+|---|---|---|
+| `migration-target` | `MIGRATION_TARGET` env var (local `lifecycle` behave branch only) | Target image ref for cross-registry migration. Empty → `tests/lifecycle/features/steps/steps.py` falls back to `ghcr.io/projectbluefin/bluefin:stable`. |
+| `extra-tags` | appended to `BEHAVE_TAG_ARGS` as `--tags <value>` (only when non-empty) | Scopes the run, e.g. `migration` runs only `@migration` scenarios instead of the whole lifecycle suite. |
+
+Wiring in `e2e.yml` (all three parts must move together — see the red flag
+below): the two input declarations under `workflow_call.inputs`, the
+`MIGRATION_TARGET`/`EXTRA_TAGS` entries in the `Run behave suite` job `env`, the
+`[[ -n "${EXTRA_TAGS}" ]] && ...` tag-filter line, and the
+`MIGRATION_TARGET="${MIGRATION_TARGET}"` line on the local behave invocation
+(the KDE-container branch deliberately does not run `@migration` and is left
+alone). The test code reads `MIGRATION_TARGET` in `steps.py` and the
+`migration.feature` / `homed_migration.feature` files document it, so the env
+var is a hard expectation, not optional.
+
+Red flag: a diff that removes or fails to declare these inputs while
+`migration-test.yml` still passes them reproduces the `startup_failure`. If you
+touch the migration env plumbing, verify the caller and the test code still
+expect the same names.
 
 ---
 
