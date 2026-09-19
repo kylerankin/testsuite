@@ -259,9 +259,11 @@ Explore/Installed toggle-button layout. For Bazaar UI tests:
 - accept both `page tab` and `toggle button` roles for those tabs
 
 The first launch often shows a **Refreshing** spinner page before the
-`AdwViewStack` content is ready. On GNOME 50, AT-SPI cache drops can also make
+`AdwViewStack` content is ready. On GNOME 50/51, AT-SPI cache drops can also make
 nodes disappear mid-query, so wrap Bazaar window/tab lookups in retry loops
-with short sleeps and re-query the tree each attempt.
+with short sleeps and re-query the tree each attempt. Upstream GNOME Software
+legacy navigation scenarios remain `@future` (#847) while Bluefin exercises
+Bazaar natively via `bazaar_ui.feature` and `bazaar_navigation.feature`.
 
 ## Desktop notifications via gdbus (smoke suite)
 
