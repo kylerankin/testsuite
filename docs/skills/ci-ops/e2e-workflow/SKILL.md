@@ -343,34 +343,7 @@ migration-test:
     migration_target: ghcr.io/<image-org>/bluefin-lts@${{ needs.build.outputs.digest }}
 ```
 
-For non-migration lifecycle runs: dispatch `upgrade-test.yml` in `<image-org>/actions`.
-
-### `e2e.yml` migration inputs: `migration-target` and `extra-tags`
-
-`migration-test.yml` calls `e2e.yml` and passes two inputs that `e2e.yml` must
-declare or GitHub rejects the `workflow_call` at startup (`startup_failure`, zero
-jobs) — this is exactly what broke the `@migration` lane from 2026-06-04 onward
-when a stale-branch merge dropped the declarations but left the caller intact.
-
-| `e2e.yml` input | Passed as | Effect |
-|---|---|---|
-| `migration-target` | `MIGRATION_TARGET` env var (local `lifecycle` behave branch only) | Target image ref for cross-registry migration. Empty → `tests/lifecycle/features/steps/steps.py` falls back to `ghcr.io/projectbluefin/bluefin:stable`. |
-| `extra-tags` | appended to `BEHAVE_TAG_ARGS` as `--tags <value>` (only when non-empty) | Scopes the run, e.g. `migration` runs only `@migration` scenarios instead of the whole lifecycle suite. |
-
-Wiring in `e2e.yml` (all three parts must move together — see the red flag
-below): the two input declarations under `workflow_call.inputs`, the
-`MIGRATION_TARGET`/`EXTRA_TAGS` entries in the `Run behave suite` job `env`, the
-`[[ -n "${EXTRA_TAGS}" ]] && ...` tag-filter line, and the
-`MIGRATION_TARGET="${MIGRATION_TARGET}"` line on the local behave invocation
-(the KDE-container branch deliberately does not run `@migration` and is left
-alone). The test code reads `MIGRATION_TARGET` in `steps.py` and the
-`migration.feature` / `homed_migration.feature` files document it, so the env
-var is a hard expectation, not optional.
-
-Red flag: a diff that removes or fails to declare these inputs while
-`migration-test.yml` still passes them reproduces the `startup_failure`. If you
-touch the migration env plumbing, verify the caller and the test code still
-expect the same names.
+For non-migration lifecycle runs: dispatch `upgrade-test.yml` in `<image-org>/actions`. `migration-test.yml` passes `migration-target` and `extra-tags` into `e2e.yml`, and both must stay declared there or the `workflow_call` is rejected at startup — wiring, the input table, and the red flag are in [`references/migration-inputs.md`](references/migration-inputs.md).
 
 ---
 
@@ -523,3 +496,4 @@ Load these when you hit the specific topic:
 - [Permission and runtime constraints when calling the reusable action.](references/permissions.md)
 - [KDE suite wiring, gating, and runner-image split.](references/kde-suites.md)
 - [Installer suite assertions, and why an env-var gate made one unreachable.](references/installer-suite.md)
+- [Migration inputs `migration-target` / `extra-tags` and the startup_failure they cause when missing.](references/migration-inputs.md)
