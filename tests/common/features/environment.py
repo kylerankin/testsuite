@@ -7,6 +7,7 @@ GSettings-focused checks over SSH against a live Bluefin session.
 import os
 import shlex
 
+from tests.shared.ssh_config import _first_value
 from tests.shared.ssh_steps import *  # noqa: F401,F403
 from tests.shared.ssh_steps import run_ssh
 
@@ -18,13 +19,6 @@ except Exception:  # noqa: BLE001
 
     def record_end(context, scenario):
         return None
-
-
-def _first_value(*values: str) -> str:
-    for value in values:
-        if value:
-            return value
-    return ""
 
 
 def _is_bluefin_image(image: str) -> bool:
@@ -235,6 +229,13 @@ def before_scenario(context, scenario):
                 context,
                 "sudo systemctl restart bootc-unified-storage.service --no-block 2>/dev/null || true",
             )
+    if "podman user socket" in getattr(scenario, "name", "").lower():
+        user = getattr(context, "ssh_user", None) or os.environ.get("SSH_USER", "bluefin-test")
+        run_ssh(
+            context,
+            f"sudo loginctl enable-linger {shlex.quote(user)} 2>/dev/null || true; "
+            "systemctl --user start podman.socket 2>/dev/null || true",
+        )
     context.command_stdout = ""
     context.last_command_output = ""
     context.last_ssh_result = None

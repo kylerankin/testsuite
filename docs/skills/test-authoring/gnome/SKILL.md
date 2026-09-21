@@ -1,7 +1,7 @@
 ---
 name: gnome
-version: "1.0"
-last_updated: "2026-07-29"
+version: "1.1"
+last_updated: "2026-09-16"
 id: gnome
 one_line_purpose: Write GNOME Shell, AT-SPI, and dogtail interaction tests.
 entry_point: docs/skills/test-authoring/gnome/SKILL.md
@@ -9,7 +9,7 @@ category: test-authoring
 mcp_compliance_level: partial
 status: active
 dependencies: []
-tags: [gnome, atspi, dogtail]
+tags: [gnome, atspi, dogtail, gnome-51]
 description: "How to write GNOME Shell / AT-SPI / dogtail tests for the testsuite repo. Load when editing GNOME interaction steps."
 metadata:
   type: pattern
@@ -73,6 +73,29 @@ cmd = "source /tmp/session.env 2>/dev/null; gdbus call --session --dest org.gnom
 _run_host(cmd)
 ```
 
+### Suppressing session idle-lock during smoke runs
+
+Long smoke test runs can exceed the desktop idle timeout, causing the session
+to lock automatically and preventing AT-SPI from querying or interacting with
+application windows (e.g. Settings panels such as Online Accounts).
+
+To prevent auto-locking, `environment.py` (`before_all`) and CI workflows configure
+session idle delay and screensaver settings:
+
+```bash
+gsettings set org.gnome.desktop.session idle-delay 0
+gsettings set org.gnome.desktop.screensaver lock-enabled false
+```
+
+Explicit screen lock/unlock tests (such as `@lock_screen` in `gnome_shell.feature`)
+test manual session locking via `loginctl lock-session` / `loginctl unlock-session`
+and logind `LockedHint`, which remain fully operational even when automatic idle
+lock is disabled.
+
+## GNOME 51 workarounds audit (issue #827)
+
+GNOME 51 (GA 2026-09-16) is Wayland-only and freezes the extension API. Keep every GNOME 50 workaround until a `gnomeos-51` run proves it obsolete — inventory, ground rules and validation procedure in [`references/gnome-51-audit.md`](references/gnome-51-audit.md).
+
 ## Remote session commands from the runner container
 
 Commands that access the GNOME user session, including `gsettings`, `gdbus
@@ -87,11 +110,20 @@ The SSH connection itself does not inherit `DBUS_SESSION_BUS_ADDRESS` or
 `WAYLAND_DISPLAY`; without this prefix, remote session calls can target no bus
 or the wrong user session and produce misleading test failures.
 
-In container mode (or nested test runners), `environment.py` automatically writes
-`/tmp/session.env` at session initialization with the active `DBUS_SESSION_BUS_ADDRESS`,
-`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`, and `XDG_SESSION_TYPE`. `_run_host()` ensures
-the file is present and executes commands under bash so POSIX `/bin/sh` does not
-abort on missing file errors.
+In container mode, `environment.py` writes `/tmp/session.env` at session init with the
+active session addresses; `_run_host()` sources it and runs under bash so `/bin/sh`
+does not abort on a missing file.
+
+## GNOME 51 accessibility gsettings round-trips (@requires_gnome_51)
+
+GNOME 51 added two `org.gnome.desktop.a11y.interface` settings pre-51 images lack
+(confirmed against the schema source, never guessed): `reduced-motion` (enum
+`no-preference`/`reduce`) and `keyboard-focus-visible-timeout` (int; `0`=forever,
+`<0`=toolkit default, shipped `-1`). Round-trip them like the smoke suite's
+high-contrast scenario in `tests/vanilla-gnome/features/gnome_accessibility_51.feature`,
+gated with `@requires_gnome_51` and skipped at runtime via a `gnome-shell --version`
+probe in `environment.py` — a probe that cannot run skips rather than fails; run
+over SSH with the session-env prefix above.
 
 ## GNOME Shell extensions and AT-SPI health in smoke
 
@@ -135,33 +167,6 @@ To resolve the genuine browser window reliably:
 4. In headless Wayland container environments where `/dev/uinput` evdev keystrokes are not routed to windows by the compositor, provide an AT-SPI fallback via `atspi_click` targeting the `"Open a new tab (Ctrl+T)"` and tab `"Close tab"` buttons.
 5. In headless Wayland environments, character entry via uinput maps punctuation and shifted keys (e.g. ':', uppercase) through an evdev lookup to avoid NoneType unpack errors. For Firefox URL navigation, remote IPC navigation provides a fallback when headless compositors drop input keystrokes, and address assertions accept both domain prefixes and loaded document titles. Clean shutdown falls back to process termination if uinput `<Ctrl><Q>` is unrouted.
 
-## Overview search entry
-
-
-**Do not** call `Main.overview._onSearchChanged()` — it was removed in GNOME 47.
-Use `clutter_text.set_text()` which emits the `text-changed` signal and
-triggers the search controller via the public signal path:
-
-```python
-_shell_eval(f'Main.overview.searchEntry.clutter_text.set_text("{text}")')
-```
-
-To read back the current search text:
-```python
-_shell_eval('Main.overview.searchEntry.clutter_text.get_text()')
-# returns: (true, 'Files')  — parse with regex on the second element
-```
-
-## Activities overview (GNOME 50 QEMU)
-
-
-`Main.overview.visible.toString()` consistently returns `false` in QEMU on GNOME 50
-even after `Main.overview.show()` is called. Do NOT assert `Main.overview.visible` or
-switch to `Main.overview._shown` without confirming on a live GNOME 50 QEMU run —
-the behavior is not reproducible locally without a full VM boot. Scenarios that depend
-on overview visibility must be quarantined (`@quarantine`) until the correct GNOME 50
-API is confirmed.
-
 ## Screenshot on failure
 
 
@@ -178,6 +183,8 @@ def after_scenario(context, scenario):
 `take_screenshot()` calls the native `org.gnome.Shell.Screenshot` D-Bus API.
 Do not call `context.sandbox.shell.eval_js(...)` for screenshots — in qecore
 4.16 `sandbox.shell` is an accessibility object and has no `eval_js` method.
+
+From the runner container the capture goes over SSH and falls back `grim` -> `gnome-screenshot -f` -> `org.gnome.Shell.Screenshot` gdbus. Every remote command must source `/tmp/session.env` or the Wayland variables are absent and all three fail, and a stale PNG at the target path is deleted first so a leftover file is never reported as a fresh screenshot. Both invariants are covered by `tests/unit/test_screenshot_capture.py`.
 
 ## GNOME Extensions CLI (subprocess)
 
@@ -258,9 +265,11 @@ Explore/Installed toggle-button layout. For Bazaar UI tests:
 - accept both `page tab` and `toggle button` roles for those tabs
 
 The first launch often shows a **Refreshing** spinner page before the
-`AdwViewStack` content is ready. On GNOME 50, AT-SPI cache drops can also make
+`AdwViewStack` content is ready. On GNOME 50/51, AT-SPI cache drops can also make
 nodes disappear mid-query, so wrap Bazaar window/tab lookups in retry loops
-with short sleeps and re-query the tree each attempt.
+with short sleeps and re-query the tree each attempt. Upstream GNOME Software
+legacy navigation scenarios remain `@future` (#847) while Bluefin exercises
+Bazaar natively via `bazaar_ui.feature` and `bazaar_navigation.feature`.
 
 ## Desktop notifications via gdbus (smoke suite)
 
@@ -280,16 +289,13 @@ Parse the ID from `context.notify_output` with `re.search(r'\(uint32 (\d+),\)', 
 
 ## Smoke desktop-identity checks: use `_run_host` + session env
 
-
 For smoke steps that need session-scoped shell state (`XDG_SESSION_TYPE`,
 `DISPLAY`, `WAYLAND_DISPLAY`) or VM-installed tools like `glxinfo`, prefer the
 suite-local `_run_host(...)` helper over plain `subprocess.run(...)`.
 
-Why: local smoke scenarios execute inside the VM during ad-hoc runs, but CI can
-run them from the Fedora runner container. `_run_host(...)` transparently hops
-to the VM over SSH in that case, and `source /tmp/session.env 2>/dev/null; ...`
-preserves the GNOME user-session environment before probing Wayland or renderer
-state.
+Why: local smoke scenarios run inside the VM, but CI can run them from the Fedora
+runner container. `_run_host(...)` transparently hops to the VM over SSH and sources
+`/tmp/session.env` to preserve the GNOME user-session environment.
 
 ## Unit-testing smoke step modules
 
@@ -492,3 +498,4 @@ Load these when you hit the specific topic:
 - [Top-bar interactions and Shell.Eval parsing on GNOME 50+.](references/top-bar.md)
 - [MIME, display, and session configuration in containerized tests.](references/display-config.md)
 - [Deep dive: Preinstalled Flatpak desktop app launch checks](references/preinstalled-flatpak-desktop-app-launch-checks.md)
+- [GNOME 50 workaround audit against GNOME 51 (issue #827)](references/gnome-51-audit.md)
