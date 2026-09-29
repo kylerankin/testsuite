@@ -163,8 +163,10 @@ jobs:
           # Disable Jekyll on GitHub Pages to serve _astro folder correctly
           touch .nojekyll
 
-          # Restore the custom domain: the wipe above deletes CNAME and 404s qa.projectbluefin.io
-          echo "qa.projectbluefin.io" > CNAME
+          # The dashboard is served from https://projectbluefin.github.io/testsuite/
+          # (astro.config.mjs base: '/testsuite/'). The org zone no longer maps
+          # qa.projectbluefin.io to this site, so DO NOT write a CNAME: a stale
+          # CNAME claims a name that redirects away and 404s on the next deploy.
           
           # Configure Git
           git config user.name "github-actions[bot]"
