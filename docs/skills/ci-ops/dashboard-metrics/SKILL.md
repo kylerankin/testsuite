@@ -128,7 +128,6 @@ counted as active.
 - Writing a `CNAME` file in `publish-to-pages.yml` (claims qa.projectbluefin.io, which redirects away and 404s).
 - Adding complex TypeScript type assertions inside a vanilla JS client-side script tag when `<script is:inline>` would safely bypass them.
 - Creating static aggregations that fail silently when a directory is empty instead of logging a meaningful exception.
-- Forgetting to write the `CNAME` file inside the Pages deploy step, causing domain 404s on the next push.
 
 ## Verification
 - [ ] Astro build passes with **0 errors and 0 warnings**: `cd dashboard && npm run build`

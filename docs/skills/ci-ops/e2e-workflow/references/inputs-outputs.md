@@ -101,7 +101,7 @@ Stable URL format:
 https://projectbluefin.github.io/testsuite/screenshots/{slug}-{suite}-latest.png
 ```
 
-The historical runs are compiled and indexed natively at `qa.projectbluefin.io` (or `https://projectbluefin.github.io/testsuite/`).
+The historical runs are compiled and indexed natively at `https://projectbluefin.github.io/testsuite/`.
 
 ### Flatpak screenshot gallery
 
