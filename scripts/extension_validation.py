@@ -24,17 +24,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Support both `python3 -m scripts.extension_validation` and
-# `python3 scripts/extension_validation.py`. When run as a plain script,
-# sys.path[0] is the scripts/ directory (not the repo root), so
-# `from scripts.e2e_summary import ...` raises ModuleNotFoundError. Add the
-# repo root (matching the ROOT convention in the other scripts/*.py) so the
-# sibling package import resolves either way.
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from scripts.e2e_summary import SUCCESS_STATUSES, count_scenarios
+try:
+    from scripts.e2e_summary import SUCCESS_STATUSES, count_scenarios
+except ModuleNotFoundError:
+    # Plain-script execution (`python3 scripts/extension_validation.py`):
+    # sys.path[0] is the scripts/ directory, not the repo root, so the
+    # `scripts` package is not importable until the repo root is on sys.path.
+    # Running as a module (`python3 -m scripts.extension_validation`) or under
+    # pytest already puts the repo root on sys.path, so this branch only fires
+    # for the direct-script case. Keeps the dual-execution contract from the
+    # module docstring while leaving every import at the top of the file.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from scripts.e2e_summary import SUCCESS_STATUSES, count_scenarios
 
 
 def _non_success_counts(counts: dict[str, int]) -> dict[str, int]:
