@@ -25,6 +25,12 @@ qecore/Behave input+AT-SPI scenario.
 
 Base image: `quay.io/gnome_infrastructure/gnome-build-meta:gnomeos-nightly`.
 
+The lane consumes the **digest reference**, never the tag:
+
+```
+quay.io/gnome_infrastructure/gnome-build-meta@sha256:57eeef917d057e37d8d5824fab195ebf3b0ad49fc1ca191b7bc02b82418ed981
+```
+
 | Tag | Digest |
 |---|---|
 | `gnomeos-nightly` (pinned for the lane) | `sha256:57eeef917d057e37d8d5824fab195ebf3b0ad49fc1ca191b7bc02b82418ed981` |
@@ -78,7 +84,16 @@ run the mandatory gate; the extension scenarios themselves live in that slice.
 
 ### 1. Provision + boot the guest
 
-Reuse the `gnome-e2e` composite action with `image: quay.io/gnome_infrastructure/gnome-build-meta:gnomeos-nightly`
+Reuse the `gnome-e2e` composite action with the **pinned digest** (the action passes
+`inputs.image` verbatim to `podman pull` / `bootc install`, so a floating tag here would
+boot the current nightly instead of the pin above):
+
+```yaml
+- uses: ./.github/actions/gnome-e2e
+  with:
+    image: quay.io/gnome_infrastructure/gnome-build-meta@sha256:57eeef917d057e37d8d5824fab195ebf3b0ad49fc1ca191b7bc02b82418ed981
+```
+
 (the action already runs `bootc install to-disk`, extracts kernel/initramfs, and boots a
 KVM QEMU VM, waiting for SSH then a live GNOME session).
 

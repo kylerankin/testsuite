@@ -43,11 +43,11 @@ The developer extension-validation lane boots a **pinned, reproducible** GNOME O
 nightly and loads the four `gnome-extensions-hive` extensions. Pinning removes the
 one moving part in the lane: the base image digest.
 
-**Pinned digest (do not float):**
+**Pinned digest (do not float):** the lane passes this digest reference — not the
+`gnomeos-nightly` tag — to the `gnome-e2e` action's `image` input.
 
 ```
-quay.io/gnome_infrastructure/gnome-build-meta:gnomeos-nightly
-sha256:57eeef917d057e37d8d5824fab195ebf3b0ad49fc1ca191b7bc02b82418ed981
+quay.io/gnome_infrastructure/gnome-build-meta@sha256:57eeef917d057e37d8d5824fab195ebf3b0ad49fc1ca191b7bc02b82418ed981
 ```
 
 Sibling tags for reference only (not pinned for the lane): `gnomeos-51`,

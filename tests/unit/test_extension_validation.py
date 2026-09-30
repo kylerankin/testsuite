@@ -109,3 +109,33 @@ def test_non_list_results_file_fails_gate_with_report(
     assert report["passed"] is False
     assert "malformed" in report["reason"]
     assert main([str(results)]) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '[{"elements": ["scenario"]}]',
+        '[{"elements": [null]}]',
+        '[{"elements": [["type", "scenario"]]}]',
+    ],
+)
+def test_non_dict_scenario_elements_fail_gate_with_report(
+    tmp_path: Path, payload: str
+) -> None:
+    """Non-dict ``elements`` entries report JSON, not an AttributeError traceback."""
+    results = tmp_path / "results.json"
+    results.write_text(payload, encoding="utf-8")
+    report = gate_report(results)
+    assert report["passed"] is False
+    assert "malformed" in report["reason"]
+    assert main([str(results)]) == 1
+
+
+def test_hook_error_run_reason_names_the_error(tmp_path: Path) -> None:
+    """A hook-error / failed-boot run must not read as an empty/all-skipped run."""
+    results = tmp_path / "results.json"
+    results.write_text(_feature_json(["hook_error", "skipped"]), encoding="utf-8")
+    report = gate_report(results)
+    assert report["passed"] is False
+    assert "errored" in report["reason"]
+    assert "empty / all-skipped" not in report["reason"]

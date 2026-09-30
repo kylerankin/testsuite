@@ -94,14 +94,32 @@ def gate_report(results_json: Path) -> dict[str, Any]:
                 f"feature objects, got {type(report).__name__}"
             ),
         }
-    counts = count_scenarios(report)
+    try:
+        counts = count_scenarios(report)
+    except (AttributeError, TypeError) as exc:
+        return {
+            "passed": False,
+            "counts": {},
+            "reason": (
+                f"malformed results file {results_json}: expected scenario objects "
+                f'under "elements": {exc}'
+            ),
+        }
     passed = is_extension_validation_pass(counts)
     if passed:
         reason = ""
-    elif counts.get("passed", 0) == 0:
-        reason = "no scenario passed (empty / all-skipped run)"
-    else:
+    elif (
+        counts.get("failed", 0)
+        or counts.get("undefined", 0)
+        or counts.get("untested", 0)
+        or counts.get(OTHER_STATUS, 0)
+    ):
+        # Checked before the passed == 0 branch so a hook-error / failed-boot run
+        # (passed == 0, other > 0) reports the cause the gate exists to catch
+        # rather than reading as a benign empty / all-skipped run.
         reason = "failed / undefined / untested / errored scenarios present"
+    else:
+        reason = "no scenario passed (empty / all-skipped run)"
     return {"passed": passed, "counts": counts, "reason": reason}
 
 
