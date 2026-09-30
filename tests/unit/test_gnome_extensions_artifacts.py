@@ -4,16 +4,14 @@ Covers every validation stage with synthetic ZIPs so the gate's contract logic
 is proven without a GNOME OS guest or the ``gnome-extensions`` pack tool.
 """
 
+import hashlib
 import json
-import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from tests.shared import gnome_extensions_artifacts as art  # noqa: E402
+from tests.shared import gnome_extensions_artifacts as art
 
 
 def _make_zip(path: Path, members: dict[str, str], uuid: str = "test@uuid") -> Path:
@@ -77,6 +75,32 @@ def test_missing_required_path_is_artifact_failure(tmp_path):
 
 # --- SHA256 --------------------------------------------------------------
 
+def test_sha256_matches_when_pinned(tmp_path):
+    zip_path = _make_zip(tmp_path / "pinned.zip", {"extension.js": "x"}, uuid="test@uuid")
+    digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+    contract = art.ExtensionContract(
+        uuid="test@uuid", source_repo="x/y", source_rev="abc",
+        required_paths=("metadata.json", "extension.js"),
+        zip_sha256=digest,
+    )
+    result = art.validate_extension_zip(zip_path, contract)
+    assert result.valid, result.errors
+    assert result.sha256_actual == digest
+    assert art.classify(result) == "ok"
+
+
+def test_sha256_pinned_in_uppercase_still_matches(tmp_path):
+    zip_path = _make_zip(tmp_path / "upper.zip", {"extension.js": "x"}, uuid="test@uuid")
+    digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+    contract = art.ExtensionContract(
+        uuid="test@uuid", source_repo="x/y", source_rev="abc",
+        required_paths=("metadata.json", "extension.js"),
+        zip_sha256=digest.upper(),
+    )
+    result = art.validate_extension_zip(zip_path, contract)
+    assert result.valid, result.errors
+
+
 def test_sha256_mismatch(tmp_path):
     contract = art.ExtensionContract(
         uuid="test@uuid", source_repo="x/y", source_rev="abc",
@@ -107,14 +131,19 @@ def test_unreadable_archive_is_harness_failure(tmp_path):
     assert art.classify(result) == "harness"
 
 
-def test_read_metadata_raises_on_non_zip(tmp_path):
+def test_corrupt_archive_is_harness_failure(tmp_path):
     contract = art.ExtensionContract(uuid="test@uuid", source_repo="x/y", source_rev="abc")
     bad = _corrupt_zip(tmp_path / "corrupt.zip")
-    with pytest.raises(art.ArtifactValidationError):
-        art._read_metadata(bad)
 
     # validate_extension_zip turns that harness failure into a classified result.
     result = art.validate_extension_zip(bad, contract)
+    assert not result.valid
+    assert art.classify(result) == "harness"
+
+
+def test_missing_file_is_harness_failure(tmp_path):
+    contract = art.ExtensionContract(uuid="test@uuid", source_repo="x/y", source_rev="abc")
+    result = art.validate_extension_zip(tmp_path / "absent.zip", contract)
     assert not result.valid
     assert art.classify(result) == "harness"
 
@@ -128,21 +157,58 @@ def _rewrite_zip_member(zip_path: Path, name: str, content: bytes) -> Path:
     return zip_path
 
 
-def test_read_metadata_raises_on_malformed_json(tmp_path):
+def test_malformed_metadata_json_is_metadata_failure(tmp_path):
     contract = art.ExtensionContract(uuid="test@uuid", source_repo="x/y", source_rev="abc")
     bad = _rewrite_zip_member(tmp_path / "bad.json.zip", "metadata.json", b"{not json")
     with pytest.raises(art.ArtifactValidationError):
-        art._read_metadata(bad)
+        art._parse_metadata(b"{not json")
     # The gate classifies it as an unsupported-metadata (metadata) failure.
     result = art.validate_extension_zip(bad, contract)
     assert not result.valid
     assert art.classify(result) == "metadata"
 
 
-def test_read_metadata_raises_on_non_object_json(tmp_path):
+def test_non_object_metadata_json_is_metadata_failure(tmp_path):
+    contract = art.ExtensionContract(uuid="test@uuid", source_repo="x/y", source_rev="abc")
     bad = _rewrite_zip_member(tmp_path / "arr.zip", "metadata.json", b"[]")
     with pytest.raises(art.ArtifactValidationError):
-        art._read_metadata(bad)
+        art._parse_metadata(b"[]")
+    assert art.classify(art.validate_extension_zip(bad, contract)) == "metadata"
+
+
+# --- hostile archives ----------------------------------------------------
+
+def test_oversized_metadata_is_rejected_without_inflating(tmp_path):
+    """A highly compressible metadata.json is refused on its declared size."""
+    contract = art.ExtensionContract(uuid="test@uuid", source_repo="x/y", source_rev="abc")
+    bomb = tmp_path / "bomb.zip"
+    with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("extension.js", "x")
+        zf.writestr("metadata.json", b"\0" * (art._MAX_METADATA_BYTES + 1))
+    assert bomb.stat().st_size < art._MAX_METADATA_BYTES  # compresses tiny
+
+    result = art.validate_extension_zip(bomb, contract)
+    assert not result.valid
+    assert any("implausibly large" in e for e in result.errors)
+    assert art.classify(result) == "metadata"
+
+
+def test_duplicate_member_names_are_rejected(tmp_path):
+    """Two metadata.json members must never validate on one and install another."""
+    contract = art.ExtensionContract(
+        uuid="test@uuid", source_repo="x/y", source_rev="abc",
+        required_paths=("metadata.json",),
+    )
+    dupe = tmp_path / "dupe.zip"
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(dupe, "w") as zf:
+            zf.writestr("metadata.json", json.dumps({"uuid": "evil@uuid"}))
+            zf.writestr("metadata.json", json.dumps({"uuid": "test@uuid"}))
+
+    result = art.validate_extension_zip(dupe, contract)
+    assert not result.valid
+    assert any("duplicate member names" in e for e in result.errors)
+    assert art.classify(result) == "artifact"
 
 
 # --- canonical contracts -------------------------------------------------
@@ -192,7 +258,23 @@ def test_main_exit_codes(tmp_path, monkeypatch):
 
     # All pass -> exit 0.
     assert art.main([str(good_a), str(good_b), str(good_c), str(good_d)]) == 0
-    # One mismatch -> exit 1.
+    # One mismatch -> exit 1, and the report carries the classify() category.
     assert art.main([str(good_a), str(good_b), str(bad_c), str(good_d)]) == 1
     # Wrong arg count -> exit 2 (usage).
     assert art.main([str(good_a)]) == 2
+
+
+def test_main_reports_classify_category(tmp_path, monkeypatch, capsys):
+    contracts = (
+        art.ExtensionContract(uuid="a@x", source_repo="r", source_rev="r" * 40,
+                              required_paths=("metadata.json", "a.js")),
+    )
+    monkeypatch.setattr(art, "CANONICAL_CONTRACTS", contracts)
+
+    wrong_uuid = _make_zip(tmp_path / "w.zip", {"a.js": "x"}, uuid="WRONG@x")
+    assert art.main([str(wrong_uuid)]) == 1
+    assert "[FAIL/metadata]" in capsys.readouterr().out
+
+    broken = _corrupt_zip(tmp_path / "broken.zip")
+    assert art.main([str(broken)]) == 1
+    assert "[FAIL/harness]" in capsys.readouterr().out

@@ -12,12 +12,14 @@ fully testable without a VM.
 
 Validation stages, in order:
 
+0. If ``zip_sha256`` is set on the contract, the archive SHA256 must match.
+   This runs first so a pinned artifact is rejected before any member of it
+   is inflated.
 1. ``metadata.json`` inside the ZIP must declare the contract ``uuid``.
 2. Every path in ``required_paths`` must be present in the ZIP.
-3. If ``zip_sha256`` is set on the contract, the archive SHA256 must match.
 
 A failure in stage 1 is an *unsupported-metadata* problem (the artifact does
-not even claim to be the right extension); a failure in stage 2 or 3 is an
+not even claim to be the right extension); a failure in stage 0 or 2 is an
 *artifact* problem (the wrong or corrupt ZIP was staged). Callers can tell the
 two apart via :func:`classify`.
 """
@@ -30,10 +32,19 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# metadata.json is the single source of truth for an extension's UUID. It lives
-# at the ZIP root for theinhnguyensoft.com widgets and for the packed
-# just-perfection archive; both are checked.
+# metadata.json is the single source of truth for an extension's UUID. Every
+# archive produced by `gnome-extensions pack` — including the packed
+# just-perfection build and the binhnguyensoft.com widgets — places it at the
+# ZIP root, so "metadata.json" is the path that matters in practice. The
+# "src/metadata.json" fallback only matches an unpacked source checkout zipped
+# verbatim; such an archive still fails `required_paths`, but reading its UUID
+# lets the gate report an artifact failure instead of a metadata one.
 _METADATA_PATHS = ("metadata.json", "src/metadata.json")
+
+#: Upper bound on the *uncompressed* size of ``metadata.json``. Real extension
+#: manifests are well under a kilobyte; anything larger is a zip bomb, so the
+#: member is rejected on its declared size before it is inflated.
+_MAX_METADATA_BYTES = 1 << 20  # 1 MiB
 
 
 def _parse_metadata(raw: bytes) -> dict:
@@ -55,11 +66,38 @@ def _parse_metadata(raw: bytes) -> dict:
 
 
 def _metadata_in(zf: zipfile.ZipFile, names: set[str]) -> dict:
-    """Return the first ``metadata.json`` found in an open archive, else raise."""
+    """Return the first ``metadata.json`` found in an open archive, else raise.
+
+    The member's declared uncompressed size is checked against
+    :data:`_MAX_METADATA_BYTES` before anything is inflated, so a highly
+    compressible manifest cannot exhaust memory.
+    """
     for meta in _METADATA_PATHS:
         if meta in names:
+            info = zf.getinfo(meta)
+            if info.file_size > _MAX_METADATA_BYTES:
+                raise ArtifactValidationError(
+                    f"{meta} is implausibly large: {info.file_size} bytes "
+                    f"(limit {_MAX_METADATA_BYTES})"
+                )
             return _parse_metadata(zf.read(meta))
     raise ArtifactValidationError("no metadata.json found in archive")
+
+
+def _duplicate_names(zf: zipfile.ZipFile) -> list[str]:
+    """Return member names that appear more than once in the central directory.
+
+    ``zipfile`` resolves a repeated name to the *last* entry, while extractors
+    differ; an archive that validates on one member and installs another is
+    never acceptable, so duplicates are rejected outright.
+    """
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for name in zf.namelist():
+        if name in seen:
+            duplicates.add(name)
+        seen.add(name)
+    return sorted(duplicates)
 
 
 class ArtifactValidationError(Exception):
@@ -109,18 +147,6 @@ class ExtensionValidationResult:
         return self.uuid_found == self.contract.uuid
 
 
-def _read_metadata(zip_path: str | Path) -> dict:
-    """Return the first ``metadata.json`` found in the ZIP, else raise."""
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            return _metadata_in(zf, set(zf.namelist()))
-    except zipfile.BadZipFile as exc:
-        raise ArtifactValidationError(f"not a valid ZIP archive: {exc}") from exc
-    except OSError as exc:
-        raise ArtifactValidationError(f"cannot read {zip_path}: {exc}") from exc
-    raise ArtifactValidationError("no metadata.json found in archive")
-
-
 def _sha256_zip(zip_path: str | Path) -> str:
     digest = hashlib.sha256()
     with open(zip_path, "rb") as fh:
@@ -143,9 +169,32 @@ def validate_extension_zip(zip_path: str | Path, contract: ExtensionContract) ->
         sha256_expected=contract.zip_sha256,
     )
 
+    # Stage 0: when the build is pinned, the hash decides before any member is
+    # inflated — a tampered archive never reaches the parsing code below.
+    if contract.zip_sha256:
+        try:
+            result.sha256_actual = _sha256_zip(zip_path)
+        except OSError as exc:
+            result.errors.append(f"archive unreadable: {exc}")
+            return result
+        # Hex digests are case-insensitive; a contract pinned in uppercase must
+        # not read as a mismatch.
+        if result.sha256_actual.lower() != contract.zip_sha256.strip().lower():
+            result.errors.append(
+                f"SHA256 mismatch: expected {contract.zip_sha256}, "
+                f"got {result.sha256_actual}"
+            )
+            return result
+
     try:
         with zipfile.ZipFile(zip_path) as zf:  # single handle for read + namelist
             names = set(zf.namelist())
+            duplicates = _duplicate_names(zf)
+            if duplicates:
+                result.errors.append(
+                    "duplicate member names: " + ", ".join(duplicates)
+                )
+                return result
             try:
                 metadata = _metadata_in(zf, names)
             except ArtifactValidationError as exc:
@@ -176,14 +225,6 @@ def validate_extension_zip(zip_path: str | Path, contract: ExtensionContract) ->
         result.errors.append(
             "missing required paths: " + ", ".join(sorted(result.required_missing))
         )
-
-    if contract.zip_sha256:
-        result.sha256_actual = _sha256_zip(zip_path)
-        if result.sha256_actual != contract.zip_sha256:
-            result.errors.append(
-                f"SHA256 mismatch: expected {contract.zip_sha256}, "
-                f"got {result.sha256_actual}"
-            )
 
     return result
 
@@ -289,7 +330,9 @@ def main(argv: list[str] | None = None) -> int:
 
     Usage: ``python -m tests.shared.gnome_extensions_artifacts path/to/*.zip``
     One positional per expected extension, in canonical order. Prints a
-    per-extension line and exits non-zero if any fails.
+    per-extension line — failures carry the :func:`classify` category so infra
+    faults are separable from extension faults — and exits non-zero if any
+    fails.
     """
     import sys
 
@@ -305,7 +348,8 @@ def main(argv: list[str] | None = None) -> int:
     failures = 0
     for contract, zip_path in zip(CANONICAL_CONTRACTS, args):
         result = validate_extension_zip(zip_path, contract)
-        status = "OK" if result.valid else "FAIL"
+        category = classify(result)
+        status = "OK" if result.valid else f"FAIL/{category}"
         print(f"[{status}] {contract.label}")
         if not result.valid:
             failures += 1
