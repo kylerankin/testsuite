@@ -31,9 +31,35 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # metadata.json is the single source of truth for an extension's UUID. It lives
-# at the ZIP root for theinhnguyensoft.com widgets and under ``src/`` for the
-# packed just-perfection archive; both are checked.
+# at the ZIP root for theinhnguyensoft.com widgets and for the packed
+# just-perfection archive; both are checked.
 _METADATA_PATHS = ("metadata.json", "src/metadata.json")
+
+
+def _parse_metadata(raw: bytes) -> dict:
+    """Parse ``metadata.json`` bytes, raising on malformed/non-object JSON.
+
+    A well-formed archive always carries a JSON object here; anything else
+    (invalid JSON, a JSON array/list) is an unsupported-metadata problem and
+    is reported rather than escaping as an uncaught exception.
+    """
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ArtifactValidationError(f"malformed metadata.json: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ArtifactValidationError(
+            f"metadata.json is not a JSON object: {type(data).__name__}"
+        )
+    return data
+
+
+def _metadata_in(zf: zipfile.ZipFile, names: set[str]) -> dict:
+    """Return the first ``metadata.json`` found in an open archive, else raise."""
+    for meta in _METADATA_PATHS:
+        if meta in names:
+            return _parse_metadata(zf.read(meta))
+    raise ArtifactValidationError("no metadata.json found in archive")
 
 
 class ArtifactValidationError(Exception):
@@ -87,10 +113,7 @@ def _read_metadata(zip_path: str | Path) -> dict:
     """Return the first ``metadata.json`` found in the ZIP, else raise."""
     try:
         with zipfile.ZipFile(zip_path) as zf:
-            names = set(zf.namelist())
-            for meta in _METADATA_PATHS:
-                if meta in names:
-                    return json.loads(zf.read(meta))
+            return _metadata_in(zf, set(zf.namelist()))
     except zipfile.BadZipFile as exc:
         raise ArtifactValidationError(f"not a valid ZIP archive: {exc}") from exc
     except OSError as exc:
@@ -121,9 +144,24 @@ def validate_extension_zip(zip_path: str | Path, contract: ExtensionContract) ->
     )
 
     try:
-        metadata = _read_metadata(zip_path)
-    except ArtifactValidationError:
-        result.errors.append("archive unreadable or missing metadata.json")
+        with zipfile.ZipFile(zip_path) as zf:  # single handle for read + namelist
+            names = set(zf.namelist())
+            try:
+                metadata = _metadata_in(zf, names)
+            except ArtifactValidationError as exc:
+                # Stage-1 metadata problem: the archive is readable but its
+                # metadata.json is missing or malformed, so it declares no usable
+                # UUID. Report it as a metadata failure, not a harness one.
+                result.errors.append(
+                    f"UUID mismatch: archive metadata could not be read ({exc}), "
+                    f"contract expects {contract.uuid!r}"
+                )
+                return result
+    except zipfile.BadZipFile as exc:
+        result.errors.append(f"archive unreadable: {exc}")
+        return result
+    except OSError as exc:
+        result.errors.append(f"archive unreadable: {exc}")
         return result
 
     result.uuid_found = metadata.get("uuid")
@@ -132,12 +170,6 @@ def validate_extension_zip(zip_path: str | Path, contract: ExtensionContract) ->
             f"UUID mismatch: archive declares {metadata.get('uuid')!r}, "
             f"contract expects {contract.uuid!r}"
         )
-
-    try:
-        names = set(zipfile.ZipFile(zip_path).namelist())
-    except (zipfile.BadZipFile, OSError) as exc:  # pragma: no cover - already opened above
-        result.errors.append(f"cannot list archive contents: {exc}")
-        return result
 
     result.required_missing = [p for p in contract.required_paths if p not in names]
     if result.required_missing:
@@ -195,14 +227,14 @@ CANONICAL_CONTRACTS: tuple[ExtensionContract, ...] = (
         uuid="sjc-gold@binhnguyensoft.com",
         source_repo="gnome-extensions-hive/sjc-gold-binhnguyensoft.com",
         source_rev="1588c7683d113e42d2f36a69165a9bacd6b1d95b",
-        required_paths=("metadata.json", "extension.js", "language.js", "sjc_price.py"),
+        required_paths=("metadata.json", "extension.js", "sjc_price.py"),
         package_recipe="root metadata",
     ),
     ExtensionContract(
         uuid="shade-inactive-windows-reborn@binhnguyensoft.com",
         source_repo="gnome-extensions-hive/Shade-Inactive-Windows-Reborn",
         source_rev="59b0afaf7320f72ef408621dafac19ec0214705b",
-        required_paths=("metadata.json", "extension.js", "stylesheet.css"),
+        required_paths=("metadata.json", "extension.js"),
         package_recipe="root metadata",
     ),
     ExtensionContract(
@@ -215,7 +247,7 @@ CANONICAL_CONTRACTS: tuple[ExtensionContract, ...] = (
             "prefs.js",
             "language.js",
             "stocks_fetch.py",
-            "schemas/gschema.xml",
+            "schemas/org.gnome.shell.extensions.stock-market-binhnguyensoft-com.gschema.xml",
         ),
         package_recipe="root metadata",
     ),
@@ -233,9 +265,9 @@ def find_contract(uuid: str) -> ExtensionContract | None:
 def validate_all(zip_by_uuid: dict[str, str | Path]) -> list[ExtensionValidationResult]:
     """Validate one staged ZIP per contract key in ``zip_by_uuid``.
 
-    Keys are contract ``uuid`` values; unknown keys are reported as a
-    ``harness`` error rather than silently ignored, so a mis-staged file is
-    never missed.
+    Keys are contract ``uuid`` values; unknown keys are reported as an error and
+    classified as ``"artifact"`` rather than silently ignored, so a mis-staged
+    file is never missed.
     """
     by_uuid = {c.uuid: c for c in CANONICAL_CONTRACTS}
     results: list[ExtensionValidationResult] = []

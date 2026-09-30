@@ -17,9 +17,10 @@ from tests.shared import gnome_extensions_artifacts as art  # noqa: E402
 
 
 def _make_zip(path: Path, members: dict[str, str], uuid: str = "test@uuid") -> Path:
-    """Write a ZIP whose metadata.json declares ``uuid``."""
+    """Write a ZIP whose metadata.json declares ``uuid`` (honoured even if the
+    caller also passes a ``metadata.json``)."""
     members = {**members}
-    members.setdefault("metadata.json", json.dumps({"uuid": uuid}))
+    members["metadata.json"] = json.dumps({"uuid": uuid})
     with zipfile.ZipFile(path, "w") as zf:
         for name, content in members.items():
             zf.writestr(name, content)
@@ -116,6 +117,32 @@ def test_read_metadata_raises_on_non_zip(tmp_path):
     result = art.validate_extension_zip(bad, contract)
     assert not result.valid
     assert art.classify(result) == "harness"
+
+
+def _rewrite_zip_member(zip_path: Path, name: str, content: bytes) -> Path:
+    """Write a ZIP containing ``name`` with ``content`` (plus a dummy sibling so
+    the archive is non-trivial)."""
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("extension.js", "x")
+        zf.writestr(name, content)
+    return zip_path
+
+
+def test_read_metadata_raises_on_malformed_json(tmp_path):
+    contract = art.ExtensionContract(uuid="test@uuid", source_repo="x/y", source_rev="abc")
+    bad = _rewrite_zip_member(tmp_path / "bad.json.zip", "metadata.json", b"{not json")
+    with pytest.raises(art.ArtifactValidationError):
+        art._read_metadata(bad)
+    # The gate classifies it as an unsupported-metadata (metadata) failure.
+    result = art.validate_extension_zip(bad, contract)
+    assert not result.valid
+    assert art.classify(result) == "metadata"
+
+
+def test_read_metadata_raises_on_non_object_json(tmp_path):
+    bad = _rewrite_zip_member(tmp_path / "arr.zip", "metadata.json", b"[]")
+    with pytest.raises(art.ArtifactValidationError):
+        art._read_metadata(bad)
 
 
 # --- canonical contracts -------------------------------------------------
