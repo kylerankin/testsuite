@@ -14,14 +14,20 @@ Validation stages, in order:
 
 0. If ``zip_sha256`` is set on the contract, the archive SHA256 must match.
    This runs first so a pinned artifact is rejected before any member of it
-   is inflated.
+   is inflated. **No canonical contract pins a hash yet** (see
+   :data:`CANONICAL_CONTRACTS`), so this stage is currently inert for every
+   artifact :func:`main` validates; it only guards contracts a caller pins
+   itself.
 1. ``metadata.json`` inside the ZIP must declare the contract ``uuid``.
-2. Every path in ``required_paths`` must be present in the ZIP.
+2. Every path in ``required_paths`` must be present in the ZIP. Those paths
+   are the members the packaging recipe actually ships and the shell actually
+   loads — compiled resources, ``lib/`` modules, schemas — not just the
+   manifest, so a ZIP that would fail to load in the guest is rejected here
+   instead of being misattributed to Bluefin later.
 
-A failure in stage 1 is an *unsupported-metadata* problem (the artifact does
-not even claim to be the right extension); a failure in stage 0 or 2 is an
-*artifact* problem (the wrong or corrupt ZIP was staged). Callers can tell the
-two apart via :func:`classify`.
+Every failure records its own category on the result as it is appended, so
+rewording a message can never silently reclassify it. Callers read the
+category via :func:`classify`.
 """
 
 from __future__ import annotations
@@ -108,6 +114,11 @@ class ArtifactValidationError(Exception):
 class ExtensionContract:
     """The pinned identity of one packaged extension.
 
+    ``required_paths`` lists every member the extension's packaging recipe
+    ships that the shell needs in order to load — including compiled
+    resources, ``lib/`` modules and schemas — so a structurally incomplete ZIP
+    is rejected before it is installed.
+
     ``zip_sha256`` is optional: structural validation (UUID + required paths)
     always runs, but the hash check is skipped until the pinned build produces
     an immutable ZIP. See :data:`CANONICAL_CONTRACTS`.
@@ -117,14 +128,17 @@ class ExtensionContract:
     source_repo: str
     source_rev: str
     required_paths: tuple[str, ...] = ()
-    optional_paths: tuple[str, ...] = ()
     zip_sha256: str | None = None
-    package_recipe: str = ""
-    shell_version: tuple[str, ...] = ()
 
     @property
     def label(self) -> str:
         return f"{self.uuid} ({self.source_repo}@{self.source_rev[:8]})"
+
+
+#: Failure categories reported by :func:`classify`.
+CATEGORY_HARNESS = "harness"
+CATEGORY_METADATA = "metadata"
+CATEGORY_ARTIFACT = "artifact"
 
 
 @dataclass
@@ -137,6 +151,15 @@ class ExtensionValidationResult:
     sha256_expected: str | None = None
     sha256_actual: str | None = None
     errors: list[str] = field(default_factory=list)
+    #: Category of the *first* failure recorded, set when the error is
+    #: appended so classification never depends on message wording.
+    category: str | None = None
+
+    def fail(self, category: str, message: str) -> None:
+        """Record one failure and its category (first category wins)."""
+        self.errors.append(message)
+        if self.category is None:
+            self.category = category
 
     @property
     def valid(self) -> bool:
@@ -170,19 +193,21 @@ def validate_extension_zip(zip_path: str | Path, contract: ExtensionContract) ->
     )
 
     # Stage 0: when the build is pinned, the hash decides before any member is
-    # inflated — a tampered archive never reaches the parsing code below.
+    # inflated — a tampered archive never reaches the parsing code below. No
+    # canonical contract pins a hash yet, so this is skipped in the gate today.
     if contract.zip_sha256:
         try:
             result.sha256_actual = _sha256_zip(zip_path)
         except OSError as exc:
-            result.errors.append(f"archive unreadable: {exc}")
+            result.fail(CATEGORY_HARNESS, f"archive unreadable: {exc}")
             return result
         # Hex digests are case-insensitive; a contract pinned in uppercase must
         # not read as a mismatch.
         if result.sha256_actual.lower() != contract.zip_sha256.strip().lower():
-            result.errors.append(
+            result.fail(
+                CATEGORY_ARTIFACT,
                 f"SHA256 mismatch: expected {contract.zip_sha256}, "
-                f"got {result.sha256_actual}"
+                f"got {result.sha256_actual}",
             )
             return result
 
@@ -191,8 +216,9 @@ def validate_extension_zip(zip_path: str | Path, contract: ExtensionContract) ->
             names = set(zf.namelist())
             duplicates = _duplicate_names(zf)
             if duplicates:
-                result.errors.append(
-                    "duplicate member names: " + ", ".join(duplicates)
+                result.fail(
+                    CATEGORY_ARTIFACT,
+                    "duplicate member names: " + ", ".join(duplicates),
                 )
                 return result
             try:
@@ -201,29 +227,32 @@ def validate_extension_zip(zip_path: str | Path, contract: ExtensionContract) ->
                 # Stage-1 metadata problem: the archive is readable but its
                 # metadata.json is missing or malformed, so it declares no usable
                 # UUID. Report it as a metadata failure, not a harness one.
-                result.errors.append(
+                result.fail(
+                    CATEGORY_METADATA,
                     f"UUID mismatch: archive metadata could not be read ({exc}), "
-                    f"contract expects {contract.uuid!r}"
+                    f"contract expects {contract.uuid!r}",
                 )
                 return result
     except zipfile.BadZipFile as exc:
-        result.errors.append(f"archive unreadable: {exc}")
+        result.fail(CATEGORY_HARNESS, f"archive unreadable: {exc}")
         return result
     except OSError as exc:
-        result.errors.append(f"archive unreadable: {exc}")
+        result.fail(CATEGORY_HARNESS, f"archive unreadable: {exc}")
         return result
 
     result.uuid_found = metadata.get("uuid")
     if result.uuid_found != contract.uuid:
-        result.errors.append(
+        result.fail(
+            CATEGORY_METADATA,
             f"UUID mismatch: archive declares {metadata.get('uuid')!r}, "
-            f"contract expects {contract.uuid!r}"
+            f"contract expects {contract.uuid!r}",
         )
 
     result.required_missing = [p for p in contract.required_paths if p not in names]
     if result.required_missing:
-        result.errors.append(
-            "missing required paths: " + ", ".join(sorted(result.required_missing))
+        result.fail(
+            CATEGORY_ARTIFACT,
+            "missing required paths: " + ", ".join(sorted(result.required_missing)),
         )
 
     return result
@@ -231,6 +260,10 @@ def validate_extension_zip(zip_path: str | Path, contract: ExtensionContract) ->
 
 def classify(result: ExtensionValidationResult) -> str:
     """Classify a failure for the gate report.
+
+    The category is read straight off the result, where
+    :meth:`ExtensionValidationResult.fail` recorded it alongside the first
+    error, so message wording and classification cannot drift apart.
 
     Returns one of:
 
@@ -241,43 +274,72 @@ def classify(result: ExtensionValidationResult) -> str:
     """
     if result.valid:
         return "ok"
-    if not result.metadata_ok and (
-        not result.errors or result.errors[0].startswith("UUID mismatch")
-    ):
-        return "metadata"
-    if result.errors and result.errors[0].startswith("archive unreadable"):
-        return "harness"
-    return "artifact"
+    return result.category or CATEGORY_ARTIFACT
 
 
 #: Canonical contract for the four extensions in issue #909.
 #:
 #: ``source_rev`` is the pinned HEAD of each hive repo (verified immutable at
-#: commit time). ``zip_sha256`` is ``None`` until #908's builder produces the
-#: immutable packaged ZIP for that revision — structural validation runs in the
-#: meantime so a mis-attributed smoke failure is still caught.
+#: commit time). ``required_paths`` mirrors what that revision's packaging
+#: recipe actually emits, checked against the upstream tree at the pinned rev:
+#: a ZIP missing any of them installs an extension that cannot load.
+#:
+#: ``zip_sha256`` is ``None`` for every contract below, so the stage-0 hash gate
+#: does not run for anything :func:`main` validates today; structural
+#: validation is what currently catches a mis-attributed smoke failure.
+#: TODO(#908): pin ``zip_sha256`` here once #908's builder publishes the
+#: immutable packaged ZIP per revision — only then is stage 0 a real tamper
+#: guarantee.
 CANONICAL_CONTRACTS: tuple[ExtensionContract, ...] = (
+    # Packed by scripts/build.sh: `gnome-extensions pack src` plus
+    # --extra-source=data/resources.gresource and --extra-source=lib, so the
+    # compiled resource bundle and the lib/ modules are part of the artifact.
     ExtensionContract(
         uuid="just-perfection-desktop@just-perfection",
         source_repo="gnome-extensions-hive/just-perfection",
         source_rev="6e82a6ebf8e9578f2ffe4e06b88f5d23f600b947",
-        required_paths=("metadata.json", "extension.js", "stylesheet.css"),
-        package_recipe="scripts/build.sh",
+        required_paths=(
+            "metadata.json",
+            "extension.js",
+            "prefs.js",
+            "stylesheet.css",
+            "data/resources.gresource",
+            "lib/API.js",
+            "lib/Manager.js",
+            "lib/Prefs/Prefs.js",
+            "lib/Prefs/PrefsKeys.js",
+            "schemas/org.gnome.shell.extensions.just-perfection.gschema.xml",
+        ),
     ),
+    # Packaged from the repo root; schemas/gschemas.compiled is committed at
+    # this rev and is what the shell loads for the extension's settings.
     ExtensionContract(
         uuid="sjc-gold@binhnguyensoft.com",
         source_repo="gnome-extensions-hive/sjc-gold-binhnguyensoft.com",
         source_rev="1588c7683d113e42d2f36a69165a9bacd6b1d95b",
-        required_paths=("metadata.json", "extension.js", "sjc_price.py"),
-        package_recipe="root metadata",
+        required_paths=(
+            "metadata.json",
+            "extension.js",
+            "prefs.js",
+            "sjc_price.py",
+            "schemas/org.gnome.shell.extensions.sjc-gold-binhnguyensoft-com.gschema.xml",
+            "schemas/gschemas.compiled",
+        ),
     ),
+    # Packaged from the repo root; no compiled schema is committed at this rev,
+    # so only the source gschema.xml is required.
     ExtensionContract(
         uuid="shade-inactive-windows-reborn@binhnguyensoft.com",
         source_repo="gnome-extensions-hive/Shade-Inactive-Windows-Reborn",
         source_rev="59b0afaf7320f72ef408621dafac19ec0214705b",
-        required_paths=("metadata.json", "extension.js"),
-        package_recipe="root metadata",
+        required_paths=(
+            "metadata.json",
+            "extension.js",
+            "prefs.js",
+            "schemas/org.gnome.shell.extensions.shade-inactive-windows-reborn.gschema.xml",
+        ),
     ),
+    # Packaged from the repo root; schemas/gschemas.compiled is committed.
     ExtensionContract(
         uuid="stock-market@binhnguyensoft.com",
         source_repo="gnome-extensions-hive/stock-market-binhnguyensoft.com",
@@ -289,8 +351,8 @@ CANONICAL_CONTRACTS: tuple[ExtensionContract, ...] = (
             "language.js",
             "stocks_fetch.py",
             "schemas/org.gnome.shell.extensions.stock-market-binhnguyensoft-com.gschema.xml",
+            "schemas/gschemas.compiled",
         ),
-        package_recipe="root metadata",
     ),
 )
 
@@ -318,7 +380,7 @@ def validate_all(zip_by_uuid: dict[str, str | Path]) -> list[ExtensionValidation
             result = ExtensionValidationResult(contract=ExtensionContract(
                 uuid=uuid, source_repo="?", source_rev="?"
             ))
-            result.errors.append("no canonical contract for this UUID")
+            result.fail(CATEGORY_ARTIFACT, "no canonical contract for this UUID")
             results.append(result)
             continue
         results.append(validate_extension_zip(zip_path, contract))

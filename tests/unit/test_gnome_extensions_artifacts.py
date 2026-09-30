@@ -229,6 +229,61 @@ def test_find_contract_roundtrip():
     assert art.find_contract("does-not-exist@uuid") is None
 
 
+def test_canonical_contracts_require_what_packaging_ships():
+    """Contracts must cover the members the shell actually loads, not just the
+    manifest — otherwise an unloadable ZIP validates and the guest failure is
+    misattributed."""
+    jp = art.find_contract("just-perfection-desktop@just-perfection")
+    assert jp is not None
+    # scripts/build.sh packs the compiled resource bundle and lib/ as extras.
+    assert "data/resources.gresource" in jp.required_paths
+    assert any(p.startswith("lib/") for p in jp.required_paths)
+    assert any(p.startswith("schemas/") for p in jp.required_paths)
+
+    # Both binhnguyensoft extensions that commit a compiled schema must require
+    # it: gschemas.compiled is what the shell reads for their settings.
+    for uuid in ("sjc-gold@binhnguyensoft.com", "stock-market@binhnguyensoft.com"):
+        contract = art.find_contract(uuid)
+        assert contract is not None
+        assert "schemas/gschemas.compiled" in contract.required_paths
+
+
+def test_canonical_contracts_pin_no_hash_yet():
+    """Stage 0 is documented as inert today; assert that stays explicit so the
+    TODO(#908) is retired deliberately rather than silently."""
+    assert all(c.zip_sha256 is None for c in art.CANONICAL_CONTRACTS)
+
+
+# --- explicit failure categories ----------------------------------------
+
+def test_category_is_recorded_on_the_result(tmp_path):
+    contract = art.ExtensionContract(uuid="real@uuid", source_repo="x/y", source_rev="abc")
+    zip_path = _make_zip(tmp_path / "cat.zip", {"extension.js": "x"}, uuid="other@uuid")
+    result = art.validate_extension_zip(zip_path, contract)
+    assert result.category == art.CATEGORY_METADATA
+    assert art.classify(result) == "metadata"
+
+
+def test_classify_does_not_depend_on_message_wording(tmp_path):
+    """Rewording an error must not reclassify the failure."""
+    contract = art.ExtensionContract(uuid="real@uuid", source_repo="x/y", source_rev="abc")
+    zip_path = _make_zip(tmp_path / "reword.zip", {"extension.js": "x"}, uuid="other@uuid")
+    result = art.validate_extension_zip(zip_path, contract)
+    result.errors[0] = "the archive names a different extension"
+    assert art.classify(result) == "metadata"
+
+
+def test_first_category_wins_when_several_checks_fail(tmp_path):
+    contract = art.ExtensionContract(
+        uuid="real@uuid", source_repo="x/y", source_rev="abc",
+        required_paths=("metadata.json", "missing.js"),
+    )
+    zip_path = _make_zip(tmp_path / "both.zip", {"extension.js": "x"}, uuid="other@uuid")
+    result = art.validate_extension_zip(zip_path, contract)
+    assert len(result.errors) == 2
+    assert art.classify(result) == "metadata"
+
+
 def test_validate_all_reports_unknown_uuid(tmp_path):
     zip_path = _make_zip(tmp_path / "x.zip", {"metadata.json": "{}"}, uuid="test@uuid")
     results = art.validate_all({"unknown@uuid": zip_path})
