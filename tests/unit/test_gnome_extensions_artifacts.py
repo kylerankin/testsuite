@@ -176,6 +176,19 @@ def test_non_object_metadata_json_is_metadata_failure(tmp_path):
     assert art.classify(art.validate_extension_zip(bad, contract)) == "metadata"
 
 
+def test_non_utf8_metadata_json_is_metadata_failure(tmp_path):
+    """json.loads raises UnicodeDecodeError (a ValueError, not a
+    JSONDecodeError) on non-UTF-8 bytes; it must not escape the no-raise
+    contract of validate_extension_zip."""
+    contract = art.ExtensionContract(uuid="test@uuid", source_repo="x/y", source_rev="abc")
+    bad = _rewrite_zip_member(tmp_path / "utf16.zip", "metadata.json", b"\xff\xfe{")
+    with pytest.raises(art.ArtifactValidationError):
+        art._parse_metadata(b"\xff\xfe{")
+    result = art.validate_extension_zip(bad, contract)
+    assert not result.valid
+    assert art.classify(result) == "metadata"
+
+
 # --- hostile archives ----------------------------------------------------
 
 def test_oversized_metadata_is_rejected_without_inflating(tmp_path):
@@ -292,44 +305,170 @@ def test_validate_all_reports_unknown_uuid(tmp_path):
     assert results[0].errors[0].startswith("no canonical contract")
 
 
-def test_main_exit_codes(tmp_path, monkeypatch):
-    contracts = (
-        art.ExtensionContract(uuid="a@x", source_repo="r", source_rev="r" * 40,
-                              required_paths=("metadata.json", "a.js")),
-        art.ExtensionContract(uuid="b@x", source_repo="r", source_rev="r" * 40,
-                              required_paths=("metadata.json", "b.js")),
-        art.ExtensionContract(uuid="c@x", source_repo="r", source_rev="r" * 40,
-                              required_paths=("metadata.json", "c.js")),
-        art.ExtensionContract(uuid="d@x", source_repo="r", source_rev="r" * 40,
-                              required_paths=("metadata.json", "d.js")),
-    )
-    monkeypatch.setattr(art, "CANONICAL_CONTRACTS", contracts)
+# --- CLI ------------------------------------------------------------------
 
-    good_a = _make_zip(tmp_path / "a.zip", {"a.js": "x"}, uuid="a@x")
-    good_b = _make_zip(tmp_path / "b.zip", {"b.js": "x"}, uuid="b@x")
-    good_c = _make_zip(tmp_path / "c.zip", {"c.js": "x"}, uuid="c@x")
-    good_d = _make_zip(tmp_path / "d.zip", {"d.js": "x"}, uuid="d@x")
-    bad_c = _make_zip(tmp_path / "cbad.zip", {"c.js": "x"}, uuid="WRONG@x")
+_CLI_CONTRACTS = tuple(
+    art.ExtensionContract(
+        uuid=f"{letter}@x",
+        source_repo="r",
+        source_rev="r" * 40,
+        required_paths=("metadata.json", f"{letter}.js"),
+        package_recipe=art.RECIPE_PACK_FROM_ROOT,
+    )
+    for letter in ("a", "b", "c", "d")
+)
+
+
+def _stage_all(tmp_path: Path) -> dict[str, Path]:
+    """One valid ZIP per :data:`_CLI_CONTRACTS`, named so that alphabetical glob
+    order differs from canonical order."""
+    names = {"a@x": "zeta.zip", "b@x": "alpha.zip", "c@x": "yankee.zip", "d@x": "beta.zip"}
+    return {
+        contract.uuid: _make_zip(
+            tmp_path / names[contract.uuid],
+            {f"{contract.uuid[0]}.js": "x"},
+            uuid=contract.uuid,
+        )
+        for contract in _CLI_CONTRACTS
+    }
+
+
+def test_main_pairs_by_declared_uuid_not_argv_order(tmp_path, monkeypatch, capsys):
+    """The documented ``*.zip`` glob must pass whatever order the shell expands.
+
+    Glob order is alphabetical by filename, which does not match canonical
+    contract order; pairing positionally made two good artifacts fail with a
+    bogus 'UUID mismatch' — exactly the misattribution #909 exists to prevent.
+    """
+    monkeypatch.setattr(art, "CANONICAL_CONTRACTS", _CLI_CONTRACTS)
+    zips = _stage_all(tmp_path)
+
+    # Alphabetical (glob) order != canonical order.
+    shuffled = [str(zips[u]) for u in ("b@x", "d@x", "a@x", "c@x")]
+    assert art.main(shuffled) == 0
+    out = capsys.readouterr().out
+    assert "FAIL" not in out
+    assert "4/4 passed" in out
+
+
+def test_main_accepts_explicit_uuid_pairs(tmp_path, monkeypatch):
+    monkeypatch.setattr(art, "CANONICAL_CONTRACTS", _CLI_CONTRACTS)
+    zips = _stage_all(tmp_path)
+    args = [f"{uuid}={zips[uuid]}" for uuid in ("d@x", "c@x", "b@x", "a@x")]
+    assert art.main(args) == 0
+
+
+def test_main_exit_codes(tmp_path, monkeypatch):
+    monkeypatch.setattr(art, "CANONICAL_CONTRACTS", _CLI_CONTRACTS)
+    zips = _stage_all(tmp_path)
+    ordered = [str(zips[u]) for u in ("a@x", "b@x", "c@x", "d@x")]
 
     # All pass -> exit 0.
-    assert art.main([str(good_a), str(good_b), str(good_c), str(good_d)]) == 0
-    # One mismatch -> exit 1, and the report carries the classify() category.
-    assert art.main([str(good_a), str(good_b), str(bad_c), str(good_d)]) == 1
-    # Wrong arg count -> exit 2 (usage).
-    assert art.main([str(good_a)]) == 2
+    assert art.main(ordered) == 0
+    # A structurally broken artifact -> exit 1.
+    incomplete = _make_zip(tmp_path / "cbad.zip", {}, uuid="c@x")  # missing c.js
+    assert art.main([*ordered[:2], str(incomplete), ordered[3]]) == 1
+    # A missing extension is a harness failure, not a silent pass.
+    assert art.main(ordered[:1]) == 1
+    # No arguments at all -> exit 2 (usage).
+    assert art.main([]) == 2
+
+
+def test_main_reports_missing_and_unknown_artifacts(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(art, "CANONICAL_CONTRACTS", _CLI_CONTRACTS)
+    zips = _stage_all(tmp_path)
+    stranger = _make_zip(tmp_path / "stranger.zip", {"a.js": "x"}, uuid="nobody@x")
+
+    assert art.main([str(zips["a@x"]), str(stranger)]) == 1
+    out = capsys.readouterr().out
+    assert "no canonical contract" in out
+    assert "no staged archive declares this UUID" in out
+    assert "[FAIL/harness]" in out
+    assert "[FAIL/metadata]" in out
+
+
+def test_main_rejects_the_same_uuid_staged_twice(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(art, "CANONICAL_CONTRACTS", _CLI_CONTRACTS)
+    zips = _stage_all(tmp_path)
+    dupe = _make_zip(tmp_path / "a-again.zip", {"a.js": "x"}, uuid="a@x")
+
+    assert art.main([str(p) for p in zips.values()] + [str(dupe)]) == 1
+    assert "staged twice" in capsys.readouterr().out
+
+
+def test_main_reports_contract_identity(tmp_path, monkeypatch, capsys):
+    """#909 step 1 wants revision, UUID, recipe and hash visible in the report."""
+    monkeypatch.setattr(art, "CANONICAL_CONTRACTS", _CLI_CONTRACTS[:1])
+    zips = _stage_all(tmp_path)
+    assert art.main([str(zips["a@x"])]) == 0
+    out = capsys.readouterr().out
+    assert "recipe=" + art.RECIPE_PACK_FROM_ROOT in out
+    assert "sha256=unpinned" in out
+    assert "a@x" in out
 
 
 def test_main_reports_classify_category(tmp_path, monkeypatch, capsys):
-    contracts = (
-        art.ExtensionContract(uuid="a@x", source_repo="r", source_rev="r" * 40,
-                              required_paths=("metadata.json", "a.js")),
-    )
-    monkeypatch.setattr(art, "CANONICAL_CONTRACTS", contracts)
+    monkeypatch.setattr(art, "CANONICAL_CONTRACTS", _CLI_CONTRACTS[:1])
 
-    wrong_uuid = _make_zip(tmp_path / "w.zip", {"a.js": "x"}, uuid="WRONG@x")
-    assert art.main([str(wrong_uuid)]) == 1
-    assert "[FAIL/metadata]" in capsys.readouterr().out
+    # Right UUID, wrong contents -> the extension's own artifact failure.
+    incomplete = _make_zip(tmp_path / "w.zip", {}, uuid="a@x")
+    assert art.main([str(incomplete)]) == 1
+    assert "[FAIL/artifact]" in capsys.readouterr().out
 
     broken = _corrupt_zip(tmp_path / "broken.zip")
     assert art.main([str(broken)]) == 1
     assert "[FAIL/harness]" in capsys.readouterr().out
+
+
+# --- UUID resolution -----------------------------------------------------
+
+def test_read_archive_uuid_roundtrip(tmp_path):
+    zip_path = _make_zip(tmp_path / "u.zip", {"a.js": "x"}, uuid="a@x")
+    assert art.read_archive_uuid(zip_path) == "a@x"
+
+
+def test_read_archive_uuid_categorises_failures(tmp_path):
+    broken = _corrupt_zip(tmp_path / "b.zip")
+    with pytest.raises(art.ArtifactValidationError) as unreadable:
+        art.read_archive_uuid(broken)
+    assert unreadable.value.category == art.CATEGORY_HARNESS
+
+    no_uuid = _rewrite_zip_member(tmp_path / "n.zip", "metadata.json", b"{}")
+    with pytest.raises(art.ArtifactValidationError) as bad_meta:
+        art.read_archive_uuid(no_uuid)
+    assert bad_meta.value.category == art.CATEGORY_METADATA
+
+
+def test_pair_archives_keeps_paths_containing_equals(tmp_path):
+    odd = tmp_path / "a=b.zip"
+    _make_zip(odd, {"a.js": "x"}, uuid="a@x")
+    pairs, problems = art.pair_archives([str(odd)])
+    assert problems == []
+    assert pairs == {"a@x": odd}
+
+
+# --- package recipe identity --------------------------------------------
+
+def test_canonical_contracts_declare_a_package_recipe():
+    """#909 step 1 pins the package recipe, so it must be assertable data."""
+    for contract in art.CANONICAL_CONTRACTS:
+        assert contract.package_recipe != art.RECIPE_UNSPECIFIED
+        assert contract.package_recipe in (
+            art.RECIPE_BUILD_SH, art.RECIPE_PACK_FROM_ROOT
+        )
+    jp = art.find_contract("just-perfection-desktop@just-perfection")
+    assert jp is not None and jp.package_recipe == art.RECIPE_BUILD_SH
+    sjc = art.find_contract("sjc-gold@binhnguyensoft.com")
+    assert sjc is not None and sjc.package_recipe == art.RECIPE_PACK_FROM_ROOT
+
+
+def test_contract_identity_names_every_pinned_field():
+    contract = art.ExtensionContract(
+        uuid="a@x", source_repo="r/s", source_rev="f" * 40,
+        package_recipe=art.RECIPE_BUILD_SH, zip_sha256="AB" * 32,
+    )
+    identity = contract.identity
+    assert "a@x" in identity
+    assert "r/s@ffffffff" in identity
+    assert art.RECIPE_BUILD_SH in identity
+    assert ("ab" * 32) in identity

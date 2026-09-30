@@ -18,7 +18,10 @@ Validation stages, in order:
    :data:`CANONICAL_CONTRACTS`), so this stage is currently inert for every
    artifact :func:`main` validates; it only guards contracts a caller pins
    itself.
-1. ``metadata.json`` inside the ZIP must declare the contract ``uuid``.
+1. ``metadata.json`` inside the ZIP must declare the contract ``uuid``. The
+   CLI also *resolves* the contract from that declared UUID (see :func:`main`),
+   so an archive is never judged against a contract it was merely passed next
+   to on the command line.
 2. Every path in ``required_paths`` must be present in the ZIP. Those paths
    are the members the packaging recipe actually ships and the shell actually
    loads — compiled resources, ``lib/`` modules, schemas — not just the
@@ -52,17 +55,48 @@ _METADATA_PATHS = ("metadata.json", "src/metadata.json")
 #: member is rejected on its declared size before it is inflated.
 _MAX_METADATA_BYTES = 1 << 20  # 1 MiB
 
+#: Failure categories reported by :func:`classify`.
+CATEGORY_HARNESS = "harness"
+CATEGORY_METADATA = "metadata"
+CATEGORY_ARTIFACT = "artifact"
+
+#: Packaging recipes a canonical artifact may be produced by. The recipe is part
+#: of the pinned identity (#909 step 1): the same revision packed a different way
+#: yields a different member set, so the recipe is asserted and reported.
+RECIPE_BUILD_SH = (
+    "scripts/build.sh (gnome-extensions pack src "
+    "--extra-source=data/resources.gresource --extra-source=lib)"
+)
+RECIPE_PACK_FROM_ROOT = "gnome-extensions pack (repository root)"
+RECIPE_UNSPECIFIED = "unspecified"
+
+
+class ArtifactValidationError(Exception):
+    """Raised when the ZIP cannot be opened or is not a valid extension archive.
+
+    ``category`` carries the failure category the caller should report, so an
+    unreadable archive (a harness fault) is never reported as a bad manifest.
+    """
+
+    def __init__(self, message: str, category: str = CATEGORY_METADATA) -> None:
+        super().__init__(message)
+        self.category = category
+
 
 def _parse_metadata(raw: bytes) -> dict:
     """Parse ``metadata.json`` bytes, raising on malformed/non-object JSON.
 
     A well-formed archive always carries a JSON object here; anything else
-    (invalid JSON, a JSON array/list) is an unsupported-metadata problem and
-    is reported rather than escaping as an uncaught exception.
+    (invalid JSON, a JSON array/list, bytes that are not valid UTF-8) is an
+    unsupported-metadata problem and is reported rather than escaping as an
+    uncaught exception. ``ValueError`` is caught rather than
+    ``json.JSONDecodeError`` because ``json.loads`` raises ``UnicodeDecodeError``
+    — a ``ValueError`` subclass that is *not* a ``JSONDecodeError`` — for
+    non-UTF-8 bytes.
     """
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
         raise ArtifactValidationError(f"malformed metadata.json: {exc}") from exc
     if not isinstance(data, dict):
         raise ArtifactValidationError(
@@ -106,10 +140,6 @@ def _duplicate_names(zf: zipfile.ZipFile) -> list[str]:
     return sorted(duplicates)
 
 
-class ArtifactValidationError(Exception):
-    """Raised when the ZIP cannot be opened or is not a valid extension archive."""
-
-
 @dataclass(frozen=True)
 class ExtensionContract:
     """The pinned identity of one packaged extension.
@@ -118,6 +148,12 @@ class ExtensionContract:
     ships that the shell needs in order to load — including compiled
     resources, ``lib/`` modules and schemas — so a structurally incomplete ZIP
     is rejected before it is installed.
+
+    ``package_recipe`` names the exact packaging command the artifact must come
+    from (issue #909 step 1 asks for the package recipe identity alongside the
+    revision, UUID and hash). It is reported with every result, so a ZIP built
+    by the wrong recipe is visible in the gate output instead of being buried
+    in a source comment.
 
     ``zip_sha256`` is optional: structural validation (UUID + required paths)
     always runs, but the hash check is skipped until the pinned build produces
@@ -129,16 +165,17 @@ class ExtensionContract:
     source_rev: str
     required_paths: tuple[str, ...] = ()
     zip_sha256: str | None = None
+    package_recipe: str = RECIPE_UNSPECIFIED
 
     @property
     def label(self) -> str:
         return f"{self.uuid} ({self.source_repo}@{self.source_rev[:8]})"
 
-
-#: Failure categories reported by :func:`classify`.
-CATEGORY_HARNESS = "harness"
-CATEGORY_METADATA = "metadata"
-CATEGORY_ARTIFACT = "artifact"
+    @property
+    def identity(self) -> str:
+        """One-line full identity: revision, UUID, recipe and pinned hash."""
+        sha = self.zip_sha256.strip().lower() if self.zip_sha256 else "unpinned"
+        return f"{self.label} recipe={self.package_recipe} sha256={sha}"
 
 
 @dataclass
@@ -298,6 +335,7 @@ CANONICAL_CONTRACTS: tuple[ExtensionContract, ...] = (
         uuid="just-perfection-desktop@just-perfection",
         source_repo="gnome-extensions-hive/just-perfection",
         source_rev="6e82a6ebf8e9578f2ffe4e06b88f5d23f600b947",
+        package_recipe=RECIPE_BUILD_SH,
         required_paths=(
             "metadata.json",
             "extension.js",
@@ -317,6 +355,7 @@ CANONICAL_CONTRACTS: tuple[ExtensionContract, ...] = (
         uuid="sjc-gold@binhnguyensoft.com",
         source_repo="gnome-extensions-hive/sjc-gold-binhnguyensoft.com",
         source_rev="1588c7683d113e42d2f36a69165a9bacd6b1d95b",
+        package_recipe=RECIPE_PACK_FROM_ROOT,
         required_paths=(
             "metadata.json",
             "extension.js",
@@ -332,6 +371,7 @@ CANONICAL_CONTRACTS: tuple[ExtensionContract, ...] = (
         uuid="shade-inactive-windows-reborn@binhnguyensoft.com",
         source_repo="gnome-extensions-hive/Shade-Inactive-Windows-Reborn",
         source_rev="59b0afaf7320f72ef408621dafac19ec0214705b",
+        package_recipe=RECIPE_PACK_FROM_ROOT,
         required_paths=(
             "metadata.json",
             "extension.js",
@@ -344,6 +384,7 @@ CANONICAL_CONTRACTS: tuple[ExtensionContract, ...] = (
         uuid="stock-market@binhnguyensoft.com",
         source_repo="gnome-extensions-hive/stock-market-binhnguyensoft.com",
         source_rev="667e40171ca6249b846e72cf28e314c5f3a79832",
+        package_recipe=RECIPE_PACK_FROM_ROOT,
         required_paths=(
             "metadata.json",
             "extension.js",
@@ -387,37 +428,136 @@ def validate_all(zip_by_uuid: dict[str, str | Path]) -> list[ExtensionValidation
     return results
 
 
+def read_archive_uuid(zip_path: str | Path) -> str:
+    """Return the UUID declared by an archive's ``metadata.json``.
+
+    This is how the gate decides *which* contract an artifact must be judged
+    against: the archive names itself, so the caller never has to know the
+    order of :data:`CANONICAL_CONTRACTS` or the order a shell glob expanded in.
+
+    Raises :class:`ArtifactValidationError` — with ``category`` set to
+    ``harness`` for an unreadable archive and ``metadata`` for a readable one
+    that declares no usable UUID.
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            metadata = _metadata_in(zf, set(zf.namelist()))
+    except zipfile.BadZipFile as exc:
+        raise ArtifactValidationError(
+            f"archive unreadable: {exc}", CATEGORY_HARNESS
+        ) from exc
+    except OSError as exc:
+        raise ArtifactValidationError(
+            f"archive unreadable: {exc}", CATEGORY_HARNESS
+        ) from exc
+    uuid = metadata.get("uuid")
+    if not isinstance(uuid, str) or not uuid:
+        raise ArtifactValidationError(
+            f"metadata.json declares no usable uuid: {uuid!r}", CATEGORY_METADATA
+        )
+    return uuid
+
+
+def pair_archives(args: list[str]) -> tuple[dict[str, Path], list[tuple[str, str, str]]]:
+    """Resolve ``args`` into a ``{uuid: path}`` map for :func:`validate_all`.
+
+    Each argument is either ``path/to.zip`` — whose contract is resolved from
+    the UUID the archive itself declares — or an explicit ``uuid=path`` pair for
+    a caller that wants to assert the pairing. Positional order is never
+    significant, so the documented ``*.zip`` glob works whatever order the shell
+    expands it in.
+
+    Returns the map plus a list of ``(subject, category, message)`` problems for
+    archives that could not be paired at all.
+    """
+    pairs: dict[str, Path] = {}
+    problems: list[tuple[str, str, str]] = []
+    for arg in args:
+        uuid: str | None = None
+        raw = arg
+        # Only treat "=" as a pairing separator when the left side looks like an
+        # extension UUID, so a path containing "=" is still usable.
+        if "=" in arg:
+            head, _, tail = arg.partition("=")
+            if "@" in head and tail:
+                uuid, raw = head, tail
+        path = Path(raw)
+        if uuid is None:
+            try:
+                uuid = read_archive_uuid(path)
+            except ArtifactValidationError as exc:
+                problems.append((str(path), exc.category, str(exc)))
+                continue
+        if uuid in pairs:
+            problems.append((
+                str(path),
+                CATEGORY_HARNESS,
+                f"{uuid} staged twice: {pairs[uuid]} and {path}",
+            ))
+            continue
+        pairs[uuid] = path
+    return pairs, problems
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI gate: validate staged ZIPs against the canonical contracts.
 
     Usage: ``python -m tests.shared.gnome_extensions_artifacts path/to/*.zip``
-    One positional per expected extension, in canonical order. Prints a
-    per-extension line — failures carry the :func:`classify` category so infra
-    faults are separable from extension faults — and exits non-zero if any
-    fails.
+    or ``... <uuid>=path/to.zip ...``. Each archive is matched to its contract
+    by the UUID its own ``metadata.json`` declares, so glob order never matters
+    and an ordering mistake in the harness can never be misattributed to an
+    extension. Every canonical extension must be supplied exactly once; a
+    missing one is reported as a ``harness`` failure.
+
+    Prints a per-extension line carrying the contract identity (revision, UUID,
+    package recipe, pinned hash) and, on failure, the :func:`classify` category
+    so infra faults are separable from extension faults. Exits non-zero if any
+    check fails.
     """
     import sys
 
     args = sys.argv[1:] if argv is None else argv
-    if len(args) != len(CANONICAL_CONTRACTS):
+    if not args:
         print(
-            f"usage: {sys.argv[0]} <zip> x{len(CANONICAL_CONTRACTS)} "
-            f"(one per canonical extension, in order)",
+            f"usage: {sys.argv[0]} <zip>... (one per canonical extension; "
+            f"each may also be given as <uuid>=<zip>)",
             file=sys.stderr,
         )
         return 2
 
+    pairs, problems = pair_archives(args)
+
     failures = 0
-    for contract, zip_path in zip(CANONICAL_CONTRACTS, args):
+    for subject, category, message in problems:
+        print(f"[FAIL/{category}] {subject}")
+        print(f"        {message}")
+        failures += 1
+
+    expected = {c.uuid for c in CANONICAL_CONTRACTS}
+    for uuid in sorted(set(pairs) - expected):
+        print(f"[FAIL/{CATEGORY_METADATA}] {pairs[uuid]}")
+        print(f"        archive declares {uuid!r}, which has no canonical contract")
+        failures += 1
+        del pairs[uuid]
+
+    for contract in CANONICAL_CONTRACTS:
+        zip_path = pairs.get(contract.uuid)
+        if zip_path is None:
+            print(f"[FAIL/{CATEGORY_HARNESS}] {contract.identity}")
+            print("        no staged archive declares this UUID")
+            failures += 1
+            continue
         result = validate_extension_zip(zip_path, contract)
         category = classify(result)
         status = "OK" if result.valid else f"FAIL/{category}"
-        print(f"[{status}] {contract.label}")
+        print(f"[{status}] {contract.identity} <- {zip_path}")
         if not result.valid:
             failures += 1
             for error in result.errors:
                 print(f"        {error}")
-    print(f"{len(CANONICAL_CONTRACTS) - failures}/{len(CANONICAL_CONTRACTS)} passed")
+
+    checked = len(CANONICAL_CONTRACTS) + len(problems)
+    print(f"{max(checked - failures, 0)}/{checked} passed")
     return 1 if failures else 0
 
 
