@@ -28,11 +28,39 @@ Every e2e run produces a desktop screenshot at end-of-run as visual proof of a w
 
 **Fallback path (QEMU monitor screendump):** If no in-VM screenshot lands (behave crashed, container never started, AT-SPI unavailable), `e2e.yml` captures the QEMU VGA framebuffer directly via the monitor socket at `/tmp/qemu-monitor.sock`. QEMU maintains this framebuffer internally even with `-display none` because mutter uses bochs-drm (card1) as the KMS device, which maps to the VGA framebuffer. The screendump is converted PPM→PNG via Python stdlib (`tests/shared/qemu_screendump.py`).
 
-If **both** paths fail (QEMU monitor socket missing or empty framebuffer), the "Promote desktop screenshot" step fails loud — a missing screenshot from a non-`common` suite is treated as a job failure, not a silent pass.
+If **both** paths fail (QEMU monitor socket missing or empty framebuffer), the "Promote desktop screenshot" step fails loud — a missing screenshot from a non-`common` suite is treated as a job failure, not a silent pass. **Exception:** an all-skipped suite (`passed == 0 and failed == 0 and skipped > 0`, e.g. `smoke-firefox` on a Flatpak-only-Firefox image) has no desktop to capture; `scripts/all_skipped.py` detects this and the step passes gracefully instead of erroring. See [All-skipped suites](#all-skipped-suites).
 
 ### Desktop screenshot distribution
 
-After the behave suite finishes, `take_fastfetch_screenshot()` is called in `after_all` for every GUI suite. The screenshot is taken in-VM via AT-SPI/Wayland. If `after_all` was not reached (e.g. the runner container failed to start), the GHA runner falls back to a QEMU monitor screendump: `sudo python3 tests/shared/qemu_screendump.py` sends a `screendump` command to `/tmp/qemu-monitor.sock` (opened at QEMU boot) and converts the PPM output to PNG using the Python stdlib. The "Promote desktop screenshot" step fails loud with `::error::` if neither source produces a file — that failure is intentional and means the container never loaded or behave exited before `after_all`.
+After the behave suite finishes, `take_fastfetch_screenshot()` is called in `after_all` for every GUI suite. The screenshot is taken in-VM via AT-SPI/Wayland. If `after_all` was not reached (e.g. the runner container failed to start), the GHA runner falls back to a QEMU monitor screendump: `sudo python3 tests/shared/qemu_screendump.py` sends a `screendump` command to `/tmp/qemu-monitor.sock` (opened at QEMU boot) and converts the PPM output to PNG using the Python stdlib. The "Promote desktop screenshot" step fails loud with `::error::` if neither source produces a file — that failure is intentional and means the container never loaded or behave exited before `after_all`. **Exception:** an all-skipped suite (`scripts/all_skipped.py` exits `0` when every scenario was skipped) is treated as a graceful pass rather than a missing artifact.
+
+## All-skipped suites
+
+A suite where **every** scenario is skipped — no pass, no fail — has no desktop
+screenshot to capture, yet the "Promote desktop screenshot" step treats a
+missing screenshot as a hard error for non-`common`/non-`lifecycle` suites. This
+matters for `smoke-firefox`: the shard runs only `tests/smoke/features/firefox.feature`,
+whose sole scenario skips when the image ships Firefox as a Flatpak only
+(`firefox app is not installed in this image`). behave already exits `0` for such
+a run, so the missing screenshot is a graceful pass, not a container that failed
+to load.
+
+The gate tolerates this in `e2e.yml`'s "Promote desktop screenshot" step via
+`scripts/all_skipped.py`, which exits `0` when `count_scenarios()` reports
+`passed == 0 and failed == 0 and skipped > 0` and `1` otherwise (an empty or
+unrun report is never a graceful pass — `passed == skipped > 0` must not slip
+through). The step checks it **before** the non-`common`/`lifecycle` screenshot
+requirement, so an all-skipped suite logs `All scenarios skipped — no screenshot
+required, gate passes` instead of `::error::`, and the downstream "Push desktop
+screenshot to GHCR" step stays skipped (`found=false`).
+
+This mirrors `scripts/assert_kde_passed.py` (the KDE false-*green* backstop):
+both are small `results.json` guards with a testable pure function, a `main()`,
+and unit tests in `tests/unit/`. `count_scenarios()` is reused rather than
+re-derived — never compute `passed` by subtraction, which scores
+`undefined`/`untested` as passing. `scripts/all_skipped.py` must stay listed in
+the `Checkout testsuite` sparse-checkout block (it is) or it will not exist at
+runtime.
 
 The screenshot is:
 

@@ -235,6 +235,7 @@ jobs:
           sparse-checkout: |
             flatpak-app-list.txt
             tests
+            scripts/all_skipped.py
             scripts/assert_kde_passed.py
             scripts/check_quarantine_age.py
             scripts/install-kde-webdriver.sh
@@ -1615,7 +1616,12 @@ jobs:
             echo "Desktop screenshot found: $SHOT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            if [[ "${SUITE_DIR}" != "common" && "${SUITE_DIR}" != "lifecycle" ]]; then
+            # An all-skipped suite (e.g. smoke-firefox on a Flatpak-only-Firefox
+            # image) has no desktop to capture. behave already exits 0 for it, so
+            # this is a graceful pass, not a missing artifact — don't fail the gate.
+            if python3 scripts/all_skipped.py results/results.json >/dev/null 2>&1; then
+              echo "All scenarios skipped — no screenshot required, gate passes"
+            elif [[ "${SUITE_DIR}" != "common" && "${SUITE_DIR}" != "lifecycle" ]]; then
               echo "::error::No desktop screenshot found for suite=${SUITE} — runner container may not have loaded or behave exited before after_all"
               exit 1
             fi
