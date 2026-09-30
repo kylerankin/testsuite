@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import e2e_summary
 from scripts.extension_validation import (
     gate_report,
     is_extension_validation_pass,
@@ -137,5 +138,19 @@ def test_hook_error_run_reason_names_the_error(tmp_path: Path) -> None:
     results.write_text(_feature_json(["hook_error", "skipped"]), encoding="utf-8")
     report = gate_report(results)
     assert report["passed"] is False
-    assert "errored" in report["reason"]
+    assert "other=1" in report["reason"]
     assert "empty / all-skipped" not in report["reason"]
+
+
+def test_unknown_non_success_status_fails_gate() -> None:
+    """A status promoted out of ``other`` must not bypass the gate.
+
+    ``e2e_summary.is_success`` fails any key outside ``SUCCESS_STATUSES``; this
+    gate derives its non-success set the same way instead of hardcoding
+    failed/undefined/untested/other, so growing ``SCENARIO_STATUSES`` cannot make
+    the gate greener than the headline.
+    """
+    counts = {"passed": 3, "skipped": 1, "error": 1}
+    assert e2e_summary.is_success(counts) is False
+    assert is_extension_validation_pass(counts) is False
+    assert is_extension_validation_pass({"passed": 3, "skipped": 1, "error": 0}) is True

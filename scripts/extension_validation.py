@@ -34,7 +34,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.e2e_summary import OTHER_STATUS, count_scenarios
+from scripts.e2e_summary import SUCCESS_STATUSES, count_scenarios
+
+
+def _non_success_counts(counts: dict[str, int]) -> dict[str, int]:
+    """Return the non-zero counts for every status that is not a success.
+
+    Derived from :data:`scripts.e2e_summary.SUCCESS_STATUSES` rather than a
+    hardcoded failed/undefined/untested/other list, so a status promoted out of
+    the ``other`` bucket (or any future behave status) keeps failing this gate
+    exactly as ``e2e_summary.is_success`` fails the headline.
+    """
+    return {
+        status: count
+        for status, count in counts.items()
+        if status not in SUCCESS_STATUSES and count
+    }
 
 
 def is_extension_validation_pass(counts: dict[str, int]) -> bool:
@@ -48,18 +63,15 @@ def is_extension_validation_pass(counts: dict[str, int]) -> bool:
     * **undefined / untested** — steps were not implemented
     * **hook-error / failed-boot / error** — any ``error`` or ``hook_error``
       scenario lands in the ``other`` bucket and fails the gate
+    * **any other non-success status** — every key outside
+      ``e2e_summary.SUCCESS_STATUSES`` must be zero, so a future behave status
+      cannot slip past this gate while failing ``e2e_summary.is_success``
 
     ``skipped`` is allowed alongside a real pass: ``@future`` / image-incompatible
     scenarios are legitimately not run.  This is intentionally stricter than
     ``e2e_summary.is_success``, which scores an all-skipped or empty run green.
     """
-    return (
-        counts.get("passed", 0) > 0
-        and counts.get("failed", 0) == 0
-        and counts.get("undefined", 0) == 0
-        and counts.get("untested", 0) == 0
-        and counts.get(OTHER_STATUS, 0) == 0
-    )
+    return counts.get("passed", 0) > 0 and not _non_success_counts(counts)
 
 def gate_report(results_json: Path) -> dict[str, Any]:
     """Evaluate the gate for a ``results.json`` and return a readable report.
@@ -106,18 +118,16 @@ def gate_report(results_json: Path) -> dict[str, Any]:
             ),
         }
     passed = is_extension_validation_pass(counts)
+    non_success = _non_success_counts(counts)
     if passed:
         reason = ""
-    elif (
-        counts.get("failed", 0)
-        or counts.get("undefined", 0)
-        or counts.get("untested", 0)
-        or counts.get(OTHER_STATUS, 0)
-    ):
+    elif non_success:
         # Checked before the passed == 0 branch so a hook-error / failed-boot run
         # (passed == 0, other > 0) reports the cause the gate exists to catch
         # rather than reading as a benign empty / all-skipped run.
-        reason = "failed / undefined / untested / errored scenarios present"
+        reason = "non-success scenarios present: " + ", ".join(
+            f"{status}={count}" for status, count in sorted(non_success.items())
+        )
     else:
         reason = "no scenario passed (empty / all-skipped run)"
     return {"passed": passed, "counts": counts, "reason": reason}

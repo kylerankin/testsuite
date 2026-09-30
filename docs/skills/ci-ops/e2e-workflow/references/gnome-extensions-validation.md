@@ -108,17 +108,22 @@ ssh -p 2222 bluefin-test@127.0.0.1 'bash -lc '"'"'
 '"'"'
 ```
 
-`session=wayland`, a non-empty AT-SPI registry reply, and the four extensions listed
-confirm the real session + AT-SPI + loaded extensions. Unknown version / provision
-failures are infrastructure errors, never green.
+`session=wayland` and a non-empty AT-SPI registry reply confirm the real session and
+AT-SPI. `gnome-extensions list` is the pre-install inventory here: step 1 boots stock
+GNOME OS, so the four hive extensions are installed later by step 3 and are **not**
+expected in this listing. Unknown version / provision failures are infrastructure
+errors, never green.
 
 ### 3. Run the extension scenarios
 
 ```bash
 cd tests/extensions
-behave extension_lifecycle.feature          # install/enable/disable/uninstall
-behave just_perfection.feature              # per-extension behaviour (real input + AT-SPI)
+behave features/extension_lifecycle.feature   # install/enable/disable/uninstall
+behave features/just_perfection.feature       # per-extension behaviour (real input + AT-SPI)
 ```
+
+Re-run the `gnome-extensions list` canary after `features/extension_lifecycle.feature`
+has installed the extensions; it must now list the four hive extensions.
 
 ### 4. Gate the run
 
@@ -138,6 +143,8 @@ passed and nothing errored**. Implemented in
 - **undefined / untested** — steps not implemented
 - **hook-error / failed-boot / error** — any `error` / `hook_error` (lands in `other`)
 - **missing-result** — no `results.json` (a failed boot produced no run)
+- **any other non-success status** — the non-success set is derived from
+  `e2e_summary.SUCCESS_STATUSES`, so a future behave status fails this gate too
 
 This is deliberately stricter than the general e2e headline
 (`scripts/e2e_summary.is_success`), which scores an all-skipped or empty run green for
