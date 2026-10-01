@@ -16,6 +16,7 @@ import traceback
 import re as _re
 import subprocess as _subprocess
 
+from tests.shared.failed_setup import record_failed_setup, write_failed_setup_marker
 from tests.shared.results_dir import resolve_results_dir
 
 try:
@@ -540,14 +541,8 @@ def before_all(context) -> None:
         _dismiss_welcome_dialog()
     except Exception as error:
         print(f"Environment error: before_all: {error}", flush=True)
-        context.failed_setup = traceback.format_exc()
-        try:
-            results_dir = resolve_results_dir(context)
-            os.makedirs(results_dir, exist_ok=True)
-            with open(os.path.join(results_dir, "failed_setup.txt"), "w", encoding="utf-8") as f:
-                f.write(context.failed_setup)
-        except Exception as write_err:
-            print(f"Failed to write failed_setup.txt: {write_err}", flush=True)
+        record_failed_setup(context, traceback.format_exc())
+
 
 def before_scenario(context, scenario) -> None:
     from tests.shared.quarantine import skip_quarantine
@@ -649,6 +644,7 @@ def before_scenario(context, scenario) -> None:
         # removed SetUnsafeMode).  Mark setup as failed so all remaining
         # scenarios are skipped and after_scenario doesn't call the broken sandbox.
         context.failed_setup = "qecore-headless startup failed: unrecoverable headless errors"
+        write_failed_setup_marker(context, context.failed_setup)
         context.scenario.skip(reason=context.failed_setup)
         return
     except (RuntimeError, AttributeError) as e:

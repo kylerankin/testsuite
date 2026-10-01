@@ -13,6 +13,7 @@ qecore-headless (invoked by the Argo runner) handles:
 import sys
 import traceback
 
+from tests.shared.failed_setup import record_failed_setup
 from tests.shared.results_dir import resolve_results_dir
 
 from qecore.sandbox import TestSandbox
@@ -190,7 +191,7 @@ def before_all(context) -> None:
         configure_screenshot_context(context, SUITE_NAME)
     except Exception as error:
         print(f"Environment error: before_all: {error}", flush=True)
-        context.failed_setup = traceback.format_exc()
+        record_failed_setup(context, traceback.format_exc())
 
 
 def before_scenario(context, scenario) -> None:

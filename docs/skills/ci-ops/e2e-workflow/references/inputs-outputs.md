@@ -28,7 +28,7 @@ Every e2e run produces a desktop screenshot at end-of-run as visual proof of a w
 
 **Fallback path (QEMU monitor screendump):** If no in-VM screenshot lands (behave crashed, container never started, AT-SPI unavailable), `e2e.yml` captures the QEMU VGA framebuffer directly via the monitor socket at `/tmp/qemu-monitor.sock`. QEMU maintains this framebuffer internally even with `-display none` because mutter uses bochs-drm (card1) as the KMS device, which maps to the VGA framebuffer. The screendump is converted PPM→PNG via Python stdlib (`tests/shared/qemu_screendump.py`).
 
-If **both** paths fail (QEMU monitor socket missing or empty framebuffer), the "Promote desktop screenshot" step fails loud — a missing screenshot from a non-`common` suite is treated as a job failure, not a silent pass. **Exception:** an all-skipped suite (`passed == 0 and failed == 0 and skipped > 0`, e.g. `smoke-firefox` on a Flatpak-only-Firefox image) has no desktop to capture; `scripts/all_skipped.py` detects this and the step passes gracefully instead of erroring. See [All-skipped suites](#all-skipped-suites).
+If **both** paths fail (QEMU monitor socket missing or empty framebuffer), the "Promote desktop screenshot" step fails loud — a missing screenshot from a non-`common` suite raises an `::error::` annotation and exits `1`, not a silent pass. (The step itself carries `continue-on-error: true` and no later step reads `steps.desktop-screenshot.outcome`, so today that annotation marks the run without turning the job red — see [Screenshot gate failure visibility](#screenshot-gate-failure-visibility).) **Exception:** an all-skipped suite (`passed == 0 and failed == 0 and skipped > 0`, e.g. `smoke-firefox` on a Flatpak-only-Firefox image) has no desktop to capture; `scripts/all_skipped.py` detects this and the step passes gracefully instead of erroring. See [All-skipped suites](#all-skipped-suites).
 
 ### Desktop screenshot distribution
 
@@ -52,7 +52,43 @@ unrun report is never a graceful pass — `passed == skipped > 0` must not slip
 through). The step checks it **before** the non-`common`/`lifecycle` screenshot
 requirement, so an all-skipped suite logs `All scenarios skipped — no screenshot
 required, gate passes` instead of `::error::`, and the downstream "Push desktop
-screenshot to GHCR" step stays skipped (`found=false`).
+screenshot to GHCR" step stays skipped (`found=false`). The invocation currently
+redirects the guard's output to `/dev/null`, so its
+`Suite breakdown: passed=… failed=… skipped=…` line and its `::error::` reasons
+do not reach the job log — reproduce them locally with
+`python3 scripts/all_skipped.py results/results.json` against the run's
+`e2e-results-*` artifact.
+
+### `results/failed_setup.txt` — the harness-failure veto
+
+An all-skipped suite and a suite whose `before_all` blew up look identical in
+`results.json`: both report `passed=0 failed=0 skipped>0`, and in the broken case
+`after_all` returns early so no in-VM screenshot is taken either. Without a
+tiebreaker the guard would convert every harness failure into a green gate.
+
+The tiebreaker is `results/failed_setup.txt`. Every `before_all` that records a
+setup failure writes it through `tests/shared/failed_setup.py`
+(`record_failed_setup()` sets `context.failed_setup` and writes the marker;
+`write_failed_setup_marker()` is for the call sites that must set the attribute
+themselves, such as smoke's qecore `SystemExit` path and KDE's
+`context.kde["failed_setup"]`). The marker lands in the resolved results dir
+(`resolve_results_dir()` → `/tmp/results`), which `e2e.yml` bind-mounts or `scp`s
+back to the runner's `results/`.
+
+`scripts/all_skipped.py` checks the marker **first** and exits `1` with
+`::error::Harness before_all setup failed: results/failed_setup.txt` when it
+exists, so a harness failure never passes the screenshot gate. Add new
+`context.failed_setup` assignments only through the shared helper — a bare
+assignment silently re-opens this hole.
+
+### Screenshot gate failure visibility
+
+The "Promote desktop screenshot" step is declared `continue-on-error: true`, and
+nothing downstream reads `steps.desktop-screenshot.outcome`. Its `exit 1`
+therefore produces an `::error::` annotation and a red step, but the job itself
+still reports success. Treat the annotation as the signal; if the gate must
+become a hard job failure, that is a CI-interface change and needs a human
+decision (see `docs/skills/meta/human-gates/SKILL.md`).
 
 This mirrors `scripts/assert_kde_passed.py` (the KDE false-*green* backstop):
 both are small `results.json` guards with a testable pure function, a `main()`,

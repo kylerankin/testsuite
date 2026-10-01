@@ -15,6 +15,7 @@ import shlex
 import sys
 import traceback
 
+from tests.shared.failed_setup import write_failed_setup_marker
 from tests.shared.ssh_config import _first_value
 from tests.shared.ssh_steps import *  # noqa: F401,F403 — register shared SSH steps
 from tests.shared.ssh_config import DEFAULT_SSH_KEY
@@ -159,6 +160,7 @@ def before_all(context) -> None:
         tb = traceback.format_exc()
         print(f"KDE setup error in before_all: {error}\n{tb}", flush=True)
         context.kde["failed_setup"] = tb
+        write_failed_setup_marker(context, tb)
 
 
 def before_scenario(context, scenario) -> None:

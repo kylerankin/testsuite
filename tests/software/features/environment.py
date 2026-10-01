@@ -8,6 +8,7 @@ import traceback
 from qecore.sandbox import TestSandbox
 from qecore.common_steps import *  # noqa: F401,F403
 
+from tests.shared.failed_setup import record_failed_setup
 from tests.shared.ssh_config import populate_ssh_context, ssh_argv
 
 try:
@@ -88,7 +89,7 @@ def before_all(context) -> None:
         configure_screenshot_context(context, SUITE_NAME)
     except Exception as error:
         print(f"Environment error: before_all: {error}")
-        context.failed_setup = traceback.format_exc()
+        record_failed_setup(context, traceback.format_exc())
 
 
 def before_scenario(context, scenario) -> None:
