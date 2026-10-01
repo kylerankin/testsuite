@@ -49,15 +49,17 @@ The gate tolerates this in `e2e.yml`'s "Promote desktop screenshot" step via
 `scripts/all_skipped.py`, which exits `0` when `count_scenarios()` reports
 `passed == 0 and failed == 0 and skipped > 0` and `1` otherwise (an empty or
 unrun report is never a graceful pass — `passed == skipped > 0` must not slip
-through). The step checks it **before** the non-`common`/`lifecycle` screenshot
-requirement, so an all-skipped suite logs `All scenarios skipped — no screenshot
-required, gate passes` instead of `::error::`, and the downstream "Push desktop
-screenshot to GHCR" step stays skipped (`found=false`). The invocation currently
-redirects the guard's output to `/dev/null`, so its
-`Suite breakdown: passed=… failed=… skipped=…` line and its `::error::` reasons
-do not reach the job log — reproduce them locally with
-`python3 scripts/all_skipped.py results/results.json` against the run's
-`e2e-results-*` artifact.
+through). The step consults it **only** for non-`common`/non-`lifecycle` suites
+— the exempt suites never run the guard, so they cannot pick up its
+annotations — and an all-skipped suite logs `All scenarios skipped — no
+screenshot required, gate passes` instead of `::error::`, while the downstream
+"Push desktop screenshot to GHCR" step stays skipped (`found=false`). The
+invocation redirects only the guard's **stderr** to `/dev/null` (`2>/dev/null`);
+everything `scripts/all_skipped.py` prints — the
+`Suite breakdown: passed=… failed=… skipped=…` line and its `::error::` reasons —
+goes to stdout and therefore does reach the job log. Reproduce the same output
+locally with `python3 scripts/all_skipped.py results/results.json` against the
+run's `e2e-results-*` artifact.
 
 ### `results/failed_setup.txt` — the harness-failure veto
 

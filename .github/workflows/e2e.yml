@@ -1619,11 +1619,16 @@ jobs:
             # An all-skipped suite (e.g. smoke-firefox on a Flatpak-only-Firefox
             # image) has no desktop to capture. behave already exits 0 for it, so
             # this is a graceful pass, not a missing artifact — don't fail the gate.
-            if python3 scripts/all_skipped.py results/results.json 2>/dev/null; then
-              echo "All scenarios skipped — no screenshot required, gate passes"
-            elif [[ "${SUITE_DIR}" != "common" && "${SUITE_DIR}" != "lifecycle" ]]; then
-              echo "::error::No desktop screenshot found for suite=${SUITE} — runner container may not have loaded or behave exited before after_all"
-              exit 1
+            if [[ "${SUITE_DIR}" != "common" && "${SUITE_DIR}" != "lifecycle" ]]; then
+              # Only non-exempt suites consult the guard: running it for an
+              # exempt suite would print its own ::error:: annotation (stdout,
+              # so 2>/dev/null does not hide it) for a step that passes anyway.
+              if python3 scripts/all_skipped.py results/results.json 2>/dev/null; then
+                echo "All scenarios skipped — no screenshot required, gate passes"
+              else
+                echo "::error::No desktop screenshot found for suite=${SUITE} — runner container may not have loaded or behave exited before after_all"
+                exit 1
+              fi
             fi
             echo "No desktop screenshot in results/ — skipping promotion"
           fi
