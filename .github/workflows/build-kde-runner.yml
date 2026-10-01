@@ -11,11 +11,22 @@
 #   - container/Containerfile.kde-runner or its requirements change
 #   - Weekly on Monday (keeps base OS + pip packages fresh)
 #   - Manual dispatch
+#
+# Validated on pull_request so a base-image (Containerfile) digest bump that breaks
+# the microdnf steps surfaces at PR time, not only after merge or on next week's
+# cron tick. On pull_request the build runs but does not push to the mutable
+# `kde-runner` tag (see `push:` below); only push to main publishes.
 
 name: Build KDE runner image
 
 on:
   push:
+    branches: [main]
+    paths:
+      - container/Containerfile.kde-runner
+      - container/requirements.kde-runner.txt
+      - .github/workflows/build-kde-runner.yml
+  pull_request:
     branches: [main]
     paths:
       - container/Containerfile.kde-runner
@@ -55,7 +66,7 @@ jobs:
         with:
           context: .
           file: container/Containerfile.kde-runner
-          push: true
+          push: ${{ github.event_name == 'push' }}
           tags: |
             ghcr.io/projectbluefin/testsuite-kde-runner:kde-runner
             ghcr.io/projectbluefin/testsuite-kde-runner:kde-runner-${{ github.sha }}
@@ -64,4 +75,5 @@ jobs:
           platforms: linux/amd64
 
       - name: Image digest
+        if: github.event_name == 'push'
         run: echo "Pushed ghcr.io/projectbluefin/testsuite-kde-runner:kde-runner @ ${{ steps.build.outputs.digest }}"

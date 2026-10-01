@@ -9,11 +9,20 @@
 #
 # Consumers: .github/workflows/e2e.yml pulls this image on the ubuntu runner
 # and pipes it into the QEMU VM to skip slow in-VM pip installs.
+#
+# Validated on pull_request so a base-image (Containerfile) digest bump that breaks
+# the microdnf steps surfaces at PR time, not only after merge or on next week's
+# cron tick. On pull_request the build runs but does not push to the mutable
+# `runner` tag (see `push:` below); only push to main publishes.
 
 name: Build test runner image
 
 on:
   push:
+    branches: [main]
+    paths:
+      - container/Containerfile.runner
+  pull_request:
     branches: [main]
     paths:
       - container/Containerfile.runner
@@ -51,7 +60,7 @@ jobs:
         with:
           context: .
           file: container/Containerfile.runner
-          push: true
+          push: ${{ github.event_name == 'push' }}
           tags: |
             ghcr.io/projectbluefin/testsuite:runner
             ghcr.io/projectbluefin/testsuite:runner-${{ github.sha }}

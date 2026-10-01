@@ -49,4 +49,43 @@ git log --oneline <last-green-sha>..<first-red-sha>
 The change that lands in that range is the breaking one. Reading the newest failing
 log alone tells you the symptom but not which merge introduced it.
 
----
+## Worked example: build-and-publish workflow gaining a PR trigger
+
+The two runner-image workflows in this repo — `.github/workflows/build-runner.yml`
+and `.github/workflows/build-kde-runner.yml` — build **and publish** an OCI image to
+GHCR. Their only guard against a breaking base-image (Containerfile) digest bump was
+`push` to `main` plus a weekly cron, so a `microdnf` step broken by a new fedora-minimal
+digest surfaced only after merge. Issue #918.
+
+The fix is two lines per workflow:
+
+1. Add a `pull_request` trigger with the **same** paths filter as `push`:
+
+   ```yaml
+   pull_request:
+     branches: [main]
+     paths:
+       - container/Containerfile.runner
+   ```
+
+2. Make the publish conditional so a PR validates the build without writing the
+   mutable `runner` / `kde-runner` tag. Only `push` to `main` publishes:
+
+   ```yaml
+   - name: Build and push
+     uses: docker/build-push-action@<sha> # v7
+     with:
+       push: ${{ github.event_name == 'push' }}
+   ```
+
+Any downstream step that consumes a publish artifact (e.g. the `Image digest` step that
+echoes `steps.build.outputs.digest`) must be guarded with `if: github.event_name ==
+'push'` too, since no digest is produced on a build-only PR run. This is the canonical
+shape of “PR-triggered counterpart” for a workflow that also publishes: build on PR,
+push only on main.
+
+## Status
+
+`build-runner.yml` and `build-kde-runner.yml` now both carry a `pull_request`
+counterpart (issue #918). Check these two plus any new buildable-artifact workflow
+against the rule above when editing `.github/workflows/`.
