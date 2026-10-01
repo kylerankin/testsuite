@@ -69,20 +69,22 @@ The fix is two lines per workflow:
    ```
 
 2. Make the publish conditional so a PR validates the build without writing the
-   mutable `runner` / `kde-runner` tag. Only `push` to `main` publishes:
+   mutable `runner` / `kde-runner` tag. Publish on everything **except** `pull_request` —
+   `push` to `main`, the weekly `schedule`, and `workflow_dispatch` all publish, so a
+   `github.event_name == 'push'` gate would silently stop the cron and manual publishes:
 
    ```yaml
    - name: Build and push
      uses: docker/build-push-action@<sha> # v7
      with:
-       push: ${{ github.event_name == 'push' }}
+       push: ${{ github.event_name != 'pull_request' }}
    ```
 
 Any downstream step that consumes a publish artifact (e.g. the `Image digest` step that
-echoes `steps.build.outputs.digest`) must be guarded with `if: github.event_name ==
-'push'` too, since no digest is produced on a build-only PR run. This is the canonical
-shape of “PR-triggered counterpart” for a workflow that also publishes: build on PR,
-push only on main.
+echoes `steps.build.outputs.digest`) must be guarded with `if: github.event_name !=
+'pull_request'` too, since no digest is produced on a build-only PR run. This is the
+canonical shape of “PR-triggered counterpart” for a workflow that also publishes: build
+on PR, push on everything else.
 
 ## Status
 

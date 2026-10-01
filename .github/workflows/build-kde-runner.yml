@@ -66,7 +66,7 @@ jobs:
         with:
           context: .
           file: container/Containerfile.kde-runner
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ghcr.io/projectbluefin/testsuite-kde-runner:kde-runner
             ghcr.io/projectbluefin/testsuite-kde-runner:kde-runner-${{ github.sha }}
@@ -75,5 +75,5 @@ jobs:
           platforms: linux/amd64
 
       - name: Image digest
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         run: echo "Pushed ghcr.io/projectbluefin/testsuite-kde-runner:kde-runner @ ${{ steps.build.outputs.digest }}"
