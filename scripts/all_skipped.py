@@ -40,6 +40,7 @@ def is_all_skipped(report: Any) -> bool:
     total = sum(counts.values())
     return skipped > 0 and total == skipped
 
+
 def format_breakdown(counts: dict[str, int]) -> str:
     return (
         "Suite breakdown: "
