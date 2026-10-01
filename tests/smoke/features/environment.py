@@ -541,7 +541,14 @@ def before_all(context) -> None:
     except Exception as error:
         print(f"Environment error: before_all: {error}", flush=True)
         context.failed_setup = traceback.format_exc()
-
+        try:
+            import os
+            results_dir = resolve_results_dir(context)
+            os.makedirs(results_dir, exist_ok=True)
+            with open(os.path.join(results_dir, "failed_setup.txt"), "w", encoding="utf-8") as f:
+                f.write(context.failed_setup)
+        except Exception as write_err:
+            print(f"Failed to write failed_setup.txt: {write_err}", flush=True)
 
 def before_scenario(context, scenario) -> None:
     from tests.shared.quarantine import skip_quarantine

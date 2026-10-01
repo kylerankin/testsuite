@@ -73,11 +73,15 @@ def test_is_all_skipped_false_on_empty_report():
     assert not is_all_skipped([])
 
 
+def test_is_all_skipped_false_with_undefined_or_error():
+    assert not is_all_skipped(_report("skipped", "undefined"))
+    assert not is_all_skipped(_report("skipped", "error"))
+    assert not is_all_skipped(_report("skipped", "hook_error"))
+
+
 def test_is_all_skipped_false_on_backgrounds_only():
     report = [{"name": "f", "elements": [{"type": "background", "status": "skipped"}]}]
     assert not is_all_skipped(report)
-
-
 # ---------------------------------------------------------------------------
 # Exit-code behaviour
 # ---------------------------------------------------------------------------
@@ -104,9 +108,21 @@ def test_one_failed_exits_one(tmp_path, capsys):
 def test_empty_report_exits_one(tmp_path, capsys):
     path = _write(tmp_path, [])
     assert main([str(path)]) == 1
-    assert "skipped=0" in capsys.readouterr().out
 
 
+def test_truncated_report_exits_one(tmp_path, capsys):
+    path = tmp_path / "results.json"
+    path.write_text('[{"elements": [{"type": "scenario", "status": "skipped"}]}', encoding="utf-8")
+    assert main([str(path)]) == 1
+    assert "incomplete or truncated" in capsys.readouterr().out
+
+
+def test_failed_setup_marker_exits_one(tmp_path, capsys):
+    path = _write(tmp_path, _report("skipped"))
+    marker = tmp_path / "failed_setup.txt"
+    marker.write_text("Traceback: TestSandbox failed", encoding="utf-8")
+    assert main([str(path), "--failed-setup-marker", str(marker)]) == 1
+    assert "Harness before_all setup failed" in capsys.readouterr().out
 def test_mixed_all_passing_exits_one(tmp_path, capsys):
     """All-passing is not all-skipped: there is real coverage to screenshot."""
     path = _write(tmp_path, _report("passed", "passed"))
