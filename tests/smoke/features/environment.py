@@ -542,7 +542,6 @@ def before_all(context) -> None:
         print(f"Environment error: before_all: {error}", flush=True)
         context.failed_setup = traceback.format_exc()
         try:
-            import os
             results_dir = resolve_results_dir(context)
             os.makedirs(results_dir, exist_ok=True)
             with open(os.path.join(results_dir, "failed_setup.txt"), "w", encoding="utf-8") as f:

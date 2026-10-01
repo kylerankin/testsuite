@@ -13,7 +13,6 @@ neither passed nor skipped anything (an empty or unrun report).
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
