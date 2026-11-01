@@ -1,15 +1,15 @@
 {
-  "id": "34456501914",
-  "timestamp": "2026-10-31T21:14:23Z",
+  "id": "41254567923",
+  "timestamp": "2026-11-01T00:50:23Z",
   "stream": "testing",
   "flavor": "dakota",
   "suite": "smoke",
   "version": "40.latest",
   "git_commit": {
     "sha": "db329ee6a053b0c655d335fcfd3d13e0db9d2ac1",
-    "message": "E2E test run compiled via projectbluefin/dakota",
+    "message": "E2E test run compiled via projectbluefin/testsuite",
     "author": "KubeVirt Lab",
-    "repo_url": "https://github.com/projectbluefin/dakota"
+    "repo_url": "https://github.com/projectbluefin/testsuite"
   },
   "environment": {
     "runner_id": "homelab-kubevirt-worker",
@@ -24,52 +24,73 @@
   },
   "summary": {
     "status": "failed",
-    "total_tests": 85,
+    "total_tests": 92,
     "passed_tests": 7,
-    "failed_tests": 58,
-    "skipped_tests": 20,
-    "total_duration_ms": 1374700
+    "failed_tests": 59,
+    "skipped_tests": 26,
+    "total_duration_ms": 1619357
   },
   "tests": [
     {
-      "name": "GNOME regression checks > No gnome-control-center coredump after session start",
+      "name": "GNOME Online Accounts smoke tests > Online Accounts panel is accessible",
+      "status": "failed",
+      "duration_ms": 122900,
+      "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
+      "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Navigate to Settings panel \"Online Accounts\"\n[SKIPPED] * Settings panel \"Online Accounts\" is visible"
+    },
+    {
+      "name": "GNOME Online Accounts smoke tests > Online Accounts provider list is non-empty",
+      "status": "failed",
+      "duration_ms": 122769,
+      "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
+      "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Navigate to Settings panel \"Online Accounts\"\n[SKIPPED] * Settings panel \"Online Accounts\" is visible\n[SKIPPED] * Online Accounts provider list is non-empty"
+    },
+    {
+      "name": "GNOME Online Accounts smoke tests > goa-daemon is running",
       "status": "passed",
-      "duration_ms": 150,
+      "duration_ms": 3823,
       "error_message": null,
-      "logs": "[PASSED] * No coredump entries exist on the host for \"gnome-control-center\""
+      "logs": "[PASSED] * Navigate to Settings panel \"Online Accounts\"\n[PASSED] * Run and save command output: \"sleep 3; pgrep -x goa-daemon && echo running\"\n[PASSED] * Last command output \"contains\" \"running\""
+    },
+    {
+      "name": "GNOME regression checks > No gnome-control-center coredump after session start",
+      "status": "failed",
+      "duration_ms": 0,
+      "error_message": null,
+      "logs": "[SKIPPED] * No coredump entries exist on the host for \"gnome-control-center\""
     },
     {
       "name": "GNOME Settings smoke tests > GNOME Settings launches and window is accessible",
       "status": "failed",
-      "duration_ms": 123007,
+      "duration_ms": 122848,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Settings window is accessible"
     },
     {
       "name": "GNOME Settings smoke tests > Settings sidebar is present with navigation items",
       "status": "failed",
-      "duration_ms": 123165,
+      "duration_ms": 122864,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Settings sidebar is present"
     },
     {
       "name": "GNOME Settings smoke tests > About page is accessible",
       "status": "failed",
-      "duration_ms": 122965,
+      "duration_ms": 122936,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Navigate to Settings panel \"About\"\n[SKIPPED] * Settings panel \"About\" is visible"
     },
     {
       "name": "GNOME Settings smoke tests > About page shows OS information",
       "status": "failed",
-      "duration_ms": 123017,
+      "duration_ms": 122943,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Navigate to Settings panel \"About\"\n[SKIPPED] * Settings panel \"About\" is visible\n[SKIPPED] * About page shows system information"
     },
     {
       "name": "GNOME Settings smoke tests > Displays settings panel is accessible",
       "status": "failed",
-      "duration_ms": 123009,
+      "duration_ms": 122806,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Navigate to Settings panel \"Displays\"\n[SKIPPED] * Settings panel \"Displays\" is visible"
     },
@@ -83,91 +104,91 @@
     {
       "name": "GNOME Settings smoke tests > Privacy settings panel is accessible",
       "status": "failed",
-      "duration_ms": 123113,
+      "duration_ms": 122941,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Navigate to Settings panel \"Privacy & Security\"\n[SKIPPED] * Settings panel \"Privacy & Security\" is visible"
     },
     {
       "name": "GNOME Settings smoke tests > Notifications settings panel is accessible",
       "status": "failed",
-      "duration_ms": 122994,
+      "duration_ms": 122944,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Navigate to Settings panel \"Notifications\"\n[SKIPPED] * Settings panel \"Notifications\" is visible"
     },
     {
       "name": "GNOME Settings smoke tests > Keyboard settings panel is accessible",
       "status": "failed",
-      "duration_ms": 123110,
+      "duration_ms": 122922,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Navigate to Settings panel \"Keyboard\"\n[SKIPPED] * Settings panel \"Keyboard\" is visible"
     },
     {
       "name": "GNOME Settings smoke tests > Power settings panel is accessible",
       "status": "failed",
-      "duration_ms": 123022,
+      "duration_ms": 122814,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Navigate to Settings panel \"Power\"\n[SKIPPED] * Settings panel \"Power\" is visible"
     },
     {
       "name": "GNOME Settings smoke tests > Accessibility settings panel is accessible",
       "status": "failed",
-      "duration_ms": 123082,
+      "duration_ms": 122809,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Navigate to Settings panel \"Accessibility\"\n[SKIPPED] * Settings panel \"Accessibility\" is visible"
     },
     {
       "name": "GNOME Settings smoke tests > Settings closes cleanly via Ctrl+Q",
       "status": "failed",
-      "duration_ms": 123059,
+      "duration_ms": 122785,
       "error_message": "ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.",
       "logs": "[PASSED] * Launch Settings via command\n[FAILED] * Settings window is accessible\n\u001b[1;31m[ERROR] ASSERT FAILED: GNOME Settings application was not found via AT-SPI after 15s: Application 'Settings' was not found in desktop.\u001b[0m\n[SKIPPED] * Key combo: \"<Ctrl><Q>\" with uinput\n[SKIPPED] * Settings is no longer running"
     },
     {
       "name": "GNOME Shell smoke tests > GNOME Shell process is running and accessible via AT-SPI",
       "status": "passed",
-      "duration_ms": 106,
+      "duration_ms": 90,
       "error_message": null,
       "logs": "[PASSED] * GNOME Shell is accessible via AT-SPI\n[PASSED] * Dump panel children to log\n[PASSED] * Dump gnome-shell AT-SPI tree to results"
     },
     {
       "name": "GNOME Shell smoke tests > Panel is present in AT-SPI tree",
       "status": "passed",
-      "duration_ms": 638,
+      "duration_ms": 554,
       "error_message": null,
       "logs": "[PASSED] * GNOME Shell is accessible via AT-SPI\n[PASSED] * Panel is present in AT-SPI tree"
     },
     {
       "name": "GNOME Shell smoke tests > Activities toggle button is visible in panel",
       "status": "passed",
-      "duration_ms": 1279,
+      "duration_ms": 1008,
       "error_message": null,
       "logs": "[PASSED] * GNOME Shell is accessible via AT-SPI\n[PASSED] * Activities toggle button is present in gnome-shell panel"
     },
     {
       "name": "GNOME Shell smoke tests > Clock toggle button is visible in panel",
       "status": "passed",
-      "duration_ms": 1288,
+      "duration_ms": 984,
       "error_message": null,
       "logs": "[PASSED] * GNOME Shell is accessible via AT-SPI\n[PASSED] * Clock toggle is visible in top bar"
     },
     {
       "name": "GNOME Shell smoke tests > System menu toggle button is visible in panel",
       "status": "passed",
-      "duration_ms": 1290,
+      "duration_ms": 1010,
       "error_message": null,
       "logs": "[PASSED] * GNOME Shell is accessible via AT-SPI\n[PASSED] * System menu toggle is visible in top bar"
     },
     {
       "name": "GNOME Shell smoke tests > Super key opens Activities overview",
       "status": "passed",
-      "duration_ms": 1047,
+      "duration_ms": 1079,
       "error_message": null,
       "logs": "[PASSED] * GNOME Shell is accessible via AT-SPI\n[PASSED] * Open Activities overview\n[PASSED] * Overview is open\n[PASSED] * Close Activities overview via D-Bus\n[PASSED] * Overview is closed"
     },
     {
       "name": "GNOME Shell smoke tests > Typing in overview populates search bar",
       "status": "failed",
-      "duration_ms": 15359,
+      "duration_ms": 13528,
       "error_message": null,
       "logs": "[PASSED] * GNOME Shell is accessible via AT-SPI\n[PASSED] * Open Activities overview\n[PASSED] * Overview is open\n[PASSED] * Dismiss the Bluefin welcome dialog if it appears\n[FAILED] * Type \"Files\" in overview search entry\n[SKIPPED] * Overview search bar contains \"Files\"\n[SKIPPED] * Close Activities overview via D-Bus"
     },
@@ -415,6 +436,34 @@
       "duration_ms": 0,
       "error_message": null,
       "logs": "[SKIPPED] * Run command on VM: \"spd-say -O\"\n[SKIPPED] * VM command return code is \"0\""
+    },
+    {
+      "name": "Power status color extension alerts > Power status color extension is enabled",
+      "status": "failed",
+      "duration_ms": 0,
+      "error_message": null,
+      "logs": "[SKIPPED] * GNOME Shell is accessible via AT-SPI\n[SKIPPED] * GNOME extension \"power-status-color@projectbluefin.io\" is re-enabled\n[SKIPPED] * GNOME extension \"power-status-color@projectbluefin.io\" is enabled\n[SKIPPED] * No gnome-shell extension load journal errors exist\n[SKIPPED] * No power-status-color extension GJS or St warnings exist in the journal"
+    },
+    {
+      "name": "Power status color extension alerts > Power button indicates reboot required when flag file exists",
+      "status": "failed",
+      "duration_ms": 0,
+      "error_message": null,
+      "logs": "[SKIPPED] Given GNOME Shell is accessible via AT-SPI\n[SKIPPED] And GNOME extension \"power-status-color@projectbluefin.io\" is re-enabled\n[SKIPPED] And GNOME extension \"power-status-color@projectbluefin.io\" is enabled\n[SKIPPED] When file \"/run/reboot-required\" is created on the host\n[SKIPPED] Then Quick Settings power button has style class \"power-status-reboot\" within 5 seconds\n[SKIPPED] When file \"/run/reboot-required\" is removed from the host\n[SKIPPED] Then Quick Settings power button does not have style class \"power-status-reboot\" within 5 seconds"
+    },
+    {
+      "name": "Power status color extension alerts > Uptime overdue alert takes precedence over reboot required",
+      "status": "failed",
+      "duration_ms": 0,
+      "error_message": null,
+      "logs": "[SKIPPED] Given GNOME Shell is accessible via AT-SPI\n[SKIPPED] And GNOME extension \"power-status-color@projectbluefin.io\" is re-enabled\n[SKIPPED] And GNOME extension \"power-status-color@projectbluefin.io\" is enabled\n[SKIPPED] And file \"/run/reboot-required\" is created on the host\n[SKIPPED] And Quick Settings power button has style class \"power-status-reboot\" within 5 seconds\n[SKIPPED] When the power status color extension simulates uptime overdue and re-evaluates status\n[SKIPPED] Then Quick Settings power button has style class \"power-status-overdue\"\n[SKIPPED] And Quick Settings power button does not have style class \"power-status-reboot\"\n[SKIPPED] When the power status color extension stops simulating uptime overdue and re-evaluates status\n[SKIPPED] And file \"/run/reboot-required\" is removed from the host\n[SKIPPED] Then Quick Settings power button has no power status alert style classes"
+    },
+    {
+      "name": "Power status color extension alerts > Extension cleans up style classes and timers on disable",
+      "status": "failed",
+      "duration_ms": 0,
+      "error_message": null,
+      "logs": "[SKIPPED] Given GNOME Shell is accessible via AT-SPI\n[SKIPPED] And GNOME extension \"power-status-color@projectbluefin.io\" is re-enabled\n[SKIPPED] And GNOME extension \"power-status-color@projectbluefin.io\" is enabled\n[SKIPPED] And file \"/run/reboot-required\" is created on the host\n[SKIPPED] And Quick Settings power button has style class \"power-status-reboot\" within 5 seconds\n[SKIPPED] When GNOME extension \"power-status-color@projectbluefin.io\" is disabled\n[SKIPPED] Then Quick Settings power button has no power status alert style classes\n[SKIPPED] And the power status color extension has no active file monitor or timer\n[SKIPPED] When file \"/run/reboot-required\" is removed from the host\n[SKIPPED] And GNOME extension \"power-status-color@projectbluefin.io\" is re-enabled\n[SKIPPED] Then Quick Settings power button has no power status alert style classes"
     },
     {
       "name": "Printing stack smoke checks > CUPS socket is enabled and active",
