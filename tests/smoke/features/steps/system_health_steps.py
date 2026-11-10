@@ -12,6 +12,8 @@ except Exception:  # noqa: BLE001
     pass
 
 
+# Failed-unit exemptions are separate from startup masks; see
+# docs/skills/ci-ops/ops/SKILL.md and the startup-service inventory linked there.
 IGNORED_FAILED_UNITS_IN_VM = {
     "mcelog.service",
     "avahi-daemon.service",
@@ -29,11 +31,20 @@ IGNORED_FAILED_UNITS_IN_VM = {
     "gnome-remote-desktop.service",
     # bootupd cannot update the bootloader inside a QEMU VM (no EFI vars/bootctl)
     "bootloader-update.service",
+    # bootctl refuses to set the systemd-boot timeout when not booted with UEFI;
+    # the CI VM boots without UEFI firmware
+    "ublue-boot-timeout.service",
+    # TuneD invokes bootc/rpm-ostree while first-boot storage initialization owns
+    # the daemon in the disposable QEMU guest. It times out only on that boot;
+    # non-virtualized failures remain release-blocking.
+    "tuned.service",
     # input-remapper cannot initialize its uinput devices inside a QEMU VM
     "input-remapper.service",
     # NVIDIA services require physical GPU hardware — always fail in QEMU
     "nvidia-persistenced.service",
     "ublue-nvctk-cdi.service",
+    "nvidia-cdi-refresh.path",
+    "nvidia-cdi-refresh.service",
     # systemd-oomd needs memory pressure files that QEMU VMs don't expose
     "systemd-oomd.service",
     "systemd-oomd.socket",
@@ -101,6 +112,7 @@ def _run_host(cmd: str, timeout: int = 30):
 def _running_in_vm() -> bool:
     _, returncode, _ = _run_host("systemd-detect-virt --quiet")
     return returncode == 0
+
 
 
 def _has_image_reference(value) -> bool:

@@ -81,24 +81,13 @@ This skill guides agents through modifying, compiling, and deploying the QA dash
    const stats = statsRes.ok ? await statsRes.json() : {};
    ```
 
-6. **Node-Based Markdown Skills Loader**: Standard Astro Content Collections cannot access files located outside the dashboard's `src/` folder (such as standard repository documentation in `docs/skills` or a sibling repository like `../common/docs/skills`). Bypass this restriction by writing a dynamic build-time filesystem loader in `src/utils/getSkills.js` utilizing `gray-matter` for YAML parsing and `marked` for Markdown rendering.
+6. **Node-Based Markdown Skills Loader**: Standard Astro Content Collections cannot access files located outside the dashboard's `src/` folder (such as standard repository documentation in `docs/skills` or a sibling repository like `../common/docs/skills`). Bypass this restriction by writing a dynamic build-time filesystem loader in `src/utils/getSkills.js` using a small `parseFrontMatter()` splitter that extracts the leading `---` block and parses it with `js-yaml` (default safe schema), plus `marked` for Markdown rendering. Do not add `gray-matter`.
 
 7. **Pagefind Search Indexing for Dynamically Loaded Skills**: Enable Pagefind search on dynamically loaded Markdown files by adding `data-pagefind-body` directly on the `<main>` or `<article>` element containing the rendered skill body, and use Pagefind metadata selectors (such as `data-pagefind-meta="category"`) to expose tags to the client-side search component.
 
-8. **Astro custom base URL constraints**: The custom domain `qa.projectbluefin.io` is mapped to the root of the site. Therefore, when the custom domain is active, `astro.config.mjs` MUST keep `base: '/'` and `site: 'https://qa.projectbluefin.io'`. Do not change them to sub-paths.
+8. **Site path — served from `https://projectbluefin.github.io/testsuite/`**: The dashboard is deployed to the `gh-pages` branch and served from the repository subpath `https://projectbluefin.github.io/testsuite/`. `astro.config.mjs` MUST keep `base: '/testsuite/'` and `site: 'https://projectbluefin.github.io'` so that absolute asset paths resolve under `/testsuite/`. Do not set `base: '/'` — on a GitHub Pages subpath that drops the `/testsuite/` prefix and 404s all CSS and Pagefind assets.
 
-9. **Deploy CNAME Preservation**: Deployment scripts that reset the `gh-pages` branch will wipe out the repository's `CNAME` setting, returning a 404 on the custom domain. The Pages deploy workflow must explicitly rewrite `qa.projectbluefin.io` to a `CNAME` file inside the deployment root on every run:
-   ```yaml
-   - name: Deploy Compiled Dashboard to gh-pages
-     run: |
-       cd old-gh-pages
-       find . -maxdepth 1 ! -name '.' ! -name '..' ! -name '.git' -exec rm -rf {} +
-       cp -r ../dashboard/dist/* .
-       touch .nojekyll
-       echo "qa.projectbluefin.io" > CNAME  # MUST PRESERVE
-       git add . && git commit -m "Deploy Astro QA dashboard"
-       git push origin gh-pages
-   ```
+9. **Do NOT write a CNAME on deploy**: The dashboard is served from `https://projectbluefin.github.io/testsuite/`, not from a custom domain. The org zone maps `qa.projectbluefin.io` to a redirect Worker (the zone hostname policy 301s it to `https://factory.projectbluefin.io/`), so any `CNAME` written to the `gh-pages` branch claims a name that no longer serves this site and 404s. `publish-to-pages.yml` must NOT write a `CNAME` file. The `base: '/testsuite/'` in `astro.config.mjs` is what makes the subpath work — not a CNAME.
 
 10. **Tailwind v4 via `@tailwindcss/vite` (no Astro integration)**: The dashboard uses Tailwind CSS v4 through the official Vite plugin (`@tailwindcss/vite`), declared in `astro.config.mjs` under `vite.plugins`, plus `@import "tailwindcss";` in `src/styles/global.css` (loaded via a `<style is:global>` block in `src/layouts/Layout.astro`). Custom design tokens live in the CSS `@theme` block in that file, not in a `tailwind.config.*` file — v4 is CSS-first, so config-file content globbing is gone. The deprecated `@astrojs/tailwind` integration (which capped `astro` at v5 via `peer astro@"^3.0.0 || ^4.0.0 || ^5.0.0"` and froze the `vite`/`esbuild`/`sharp` patch stream) must not be re-added. With the cap gone, `renovate.json` no longer constrains the astro major; validate any astro major bump locally with `cd dashboard && rm -rf node_modules && npm ci && npm run build` — `npm install` alone is not sufficient, because it resolves differently than `npm ci`.
 
@@ -110,8 +99,29 @@ This skill guides agents through modifying, compiling, and deploying the QA dash
 |---|---|
 | "I will hardcode `./raw-runs` in my script since I am running it from the root." | Someone else or the GHA run will execute it from another folder and fail with a directory mismatch. Always resolve paths relative to the script location. |
 | "Astro should fetch all logs from a remote database in the browser." | Fetching hundreds of logs in client-side JS introduces major latency. Compiling them statically at build-time using `import.meta.glob` is faster and completely serverless. |
-| "GitHub handles the custom domain automatically, no need to push CNAME." | Cleaning the pages branch during deploy deletes the CNAME file, which instantly breaks the custom domain. Always write CNAME back during the build. |
+| "The CNAME to qa.projectbluefin.io must be preserved on every deploy." | qa.projectbluefin.io is a redirect, not this site's domain. Writing CNAME claims a name that 301s away and 404s. Never write CNAME — serve from https://projectbluefin.github.io/testsuite/ via base: '/testsuite/'. |
 | "A dependency bump PR is green, so the dashboard still builds." | `publish-to-pages.yml` never runs on pull requests. Green PR checks say nothing about `npm ci`; run it locally before merging any `dashboard/` dependency change. |
+
+## Behave converter CLI
+
+`dashboard/scripts/convert_behave.py` takes seven operands: the input JSON,
+run ID, caller repository, slug, suite, timestamp, and output directory.
+That means eight `sys.argv` entries including the script name. With fewer
+operands it prints usage and exits 1 before reading input or creating output.
+`tests/unit/test_convert_behave_cli.py` covers zero through six operands and
+successful conversion with all seven; the six-operand case catches an
+otherwise easy-to-miss off-by-one in the guard.
+
+### Per-test status and error text
+
+Each `tests[]` entry carries the normalized scenario status — `passed`,
+`failed` or `skipped` — matching the summary bucket it was counted in.
+`LogViewer.astro` draws `skipped` grey and collapsed; collapsing it into
+`failed` once rendered every `@pending`/`@future` scenario as a red failure
+under a SUCCESS badge. behave writes a multi-line `error_message` (every
+traceback) as a list of lines, so `error_text()` joins it before it reaches
+the log or the `error_message` field, the same rule as
+`scripts/e2e_summary.py:error_text`.
 
 ## Coverage badges: `scripts/generate_badges.py`
 
@@ -135,13 +145,14 @@ means updating `count_scenarios()` — otherwise those scenarios are silently
 counted as active.
 
 ## Red Flags
-- Setting `base: '/testsuite/'` in `astro.config.mjs` while deploying to the custom domain `qa.projectbluefin.io` (breaks CSS andPagefind assets).
+- Setting `base: '/'` in `astro.config.mjs` while deploying to `https://projectbluefin.github.io/testsuite/` (drops the `/testsuite/` prefix and 404s CSS and Pagefind assets).
+- Writing a `CNAME` file in `publish-to-pages.yml` (claims qa.projectbluefin.io, which redirects away and 404s).
 - Adding complex TypeScript type assertions inside a vanilla JS client-side script tag when `<script is:inline>` would safely bypass them.
 - Creating static aggregations that fail silently when a directory is empty instead of logging a meaningful exception.
-- Forgetting to write the `CNAME` file inside the Pages deploy step, causing domain 404s on the next push.
 
 ## Verification
 - [ ] Astro build passes with **0 errors and 0 warnings**: `cd dashboard && npm run build`
 - [ ] Pagefind client-side search index is compiled successfully.
 - [ ] Path resolution in Python scripts works correctly from any folder directory.
-- [ ] Custom domain `CNAME` file generation is included in the `publish-to-pages.yml` file.
+- [ ] `publish-to-pages.yml` does NOT write a `CNAME` file, and the dashboard loads (200, CSS + Pagefind assets) at `https://projectbluefin.github.io/testsuite/`.
+- [ ] After the first CNAME-less deploy, the repository Pages custom domain is empty: `curl -sI https://projectbluefin.github.io/testsuite/` must return `200`, not a `301` to `qa.projectbluefin.io`. GitHub normally clears the custom-domain setting when `CNAME` disappears from the publishing branch; if the redirect persists, clear the domain by hand in **Settings → Pages → Custom domain**, otherwise the `github.io` URL keeps forwarding to a host that no longer serves this site.

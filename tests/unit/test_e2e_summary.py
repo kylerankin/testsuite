@@ -1,6 +1,14 @@
 """Unit tests for e2e job-summary result counting."""
 
-from scripts.e2e_summary import count_scenarios, is_success, summary_icon
+import json
+from scripts.e2e_summary import (
+    count_scenarios,
+    error_text,
+    is_success,
+    load_report,
+    scenario_statuses,
+    summary_icon,
+)
 
 
 def _report(*statuses, element_type="scenario"):
@@ -105,8 +113,120 @@ def test_failed_run_renders_failure_icon():
     assert summary_icon(counts) == "❌"
 
 
-def test_skipped_only_and_empty_runs_stay_green():
+def test_skipped_only_run_stays_green():
     counts = count_scenarios(_report("skipped"))
 
     assert summary_icon(counts) == "✅"
-    assert summary_icon(count_scenarios([])) == "✅"
+
+
+def test_empty_run_is_not_success():
+    # A run that counted no scenarios proved nothing; before load_report an
+    # empty or '['-only results.json raised, now it parses to [] and must not
+    # render green.
+    counts = count_scenarios([])
+
+    assert not is_success(counts)
+    assert summary_icon(counts) == "⚠️"
+
+
+def test_scenario_statuses_excludes_backgrounds():
+    report = [
+        {
+            "elements": [
+                {"type": "background", "name": "Shared setup", "status": "passed"},
+                {"type": "scenario", "name": "launch", "status": "failed"},
+                {"type": "scenario", "name": "quit", "status": "passed"},
+            ]
+        }
+    ]
+
+    assert scenario_statuses(report) == {"launch": "failed", "quit": "passed"}
+
+
+def test_scenario_statuses_skips_nameless_elements():
+    report = [{"elements": [{"type": "scenario", "status": "passed"}]}]
+
+    assert scenario_statuses(report) == {}
+
+
+def test_scenario_statuses_defaults_missing_status_to_unknown():
+    report = [{"elements": [{"type": "scenario", "name": "orphan"}]}]
+
+    assert scenario_statuses(report) == {"orphan": "unknown"}
+
+
+def test_scenario_statuses_tolerates_features_without_elements():
+    assert scenario_statuses([{}, {"elements": None}]) == {}
+
+
+def _feature(name="feature", status="passed"):
+    return {"name": name, "elements": [{"type": "scenario", "name": name, "status": status}]}
+
+
+def test_load_report_parses_valid_json_unchanged():
+    report = [_feature("a"), _feature("b")]
+
+    assert load_report(json.dumps(report)) == (report, True)
+
+
+def test_load_report_empty_input_is_incomplete():
+    assert load_report("") == ([], False)
+
+
+def test_load_report_open_bracket_only_is_incomplete():
+    assert load_report("[") == ([], False)
+
+
+def test_load_report_non_array_document_is_incomplete():
+    assert load_report('{"name": "x"}') == ([], False)
+
+
+def test_load_report_salvages_complete_features_without_footer():
+    # behave flushes each completed feature in eof() and writes the closing
+    # ']' only in close(); a crash before close() leaves the objects minus the
+    # footer. Every complete feature must survive.
+    report = [_feature("a"), _feature("b"), _feature("c")]
+    crashed = json.dumps(report)[:-1]  # drop the trailing ']'
+
+    recovered, complete = load_report(crashed)
+
+    assert recovered == report
+    assert not complete
+    assert count_scenarios(recovered)["passed"] == 3
+
+
+def test_load_report_drops_truncated_final_feature():
+    report = [_feature("a"), _feature("b"), _feature("c")]
+    truncated = json.dumps(report)[: len(json.dumps(report)) - 5]  # chop part of last
+
+    recovered, complete = load_report(truncated)
+
+    assert [f["name"] for f in recovered] == ["a", "b"]
+    assert not complete
+
+
+def test_load_report_trailing_comma_without_object_returns_features():
+    report = [_feature("a"), _feature("b")]
+    crashed = json.dumps(report) + ","  # complete objects, then a dangling comma
+
+    recovered, complete = load_report(crashed)
+
+    assert [f["name"] for f in recovered] == ["a", "b"]
+    assert not complete
+
+
+def test_error_text_joins_behave_list_of_lines():
+    # behave's JSON formatter splits a multi-line error_message into a list.
+    assert error_text(["Assertion Failed: boom", "Traceback (most recent call last):"]) == (
+        "Assertion Failed: boom\nTraceback (most recent call last):"
+    )
+
+
+def test_error_text_keeps_a_single_line_string():
+    assert error_text("AssertionError: nope") == "AssertionError: nope"
+
+
+def test_error_text_treats_missing_message_as_empty():
+    assert error_text(None) == ""
+    assert error_text("") == ""
+    assert error_text([]) == ""

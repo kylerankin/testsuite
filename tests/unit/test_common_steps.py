@@ -249,26 +249,24 @@ class TestCommonEnvironmentDakotaOnly:
         assert scenario.skip_message is None
 
 
-class TestCommonEnvironmentRequiresBctl:
-    def test_skips_requires_bctl_when_bctl_is_missing(self):
-        m = _import_common_environment(run_ssh_returncode=1)
-        context = _ctx(is_bluefin_image=True, has_brew=True, has_bctl=None)
-        scenario = _Scenario(["requires_bctl"])
+class TestCommonEnvironmentSkipUtah:
+    def test_skips_skip_utah_on_utah_image(self):
+        m = _import_common_environment()
+        context = _ctx(is_bluefin_image=True, is_utah_image=True, has_brew=True)
+        scenario = _Scenario(["bluefin", "skip_utah"])
 
         m.before_scenario(context, scenario)
 
-        assert scenario.skip_message == "bluefinctl (bctl) not present on this image"
-        assert context.has_bctl is False
+        assert "Skipping @skip_utah scenario" in scenario.skip_message
 
-    def test_allows_requires_bctl_when_bctl_is_present(self):
-        m = _import_common_environment(run_ssh_returncode=0)
-        context = _ctx(is_bluefin_image=True, has_brew=True, has_bctl=None)
-        scenario = _Scenario(["requires_bctl"])
+    def test_allows_skip_utah_on_bluefin_image(self):
+        m = _import_common_environment()
+        context = _ctx(is_bluefin_image=True, is_utah_image=False, has_brew=True)
+        scenario = _Scenario(["bluefin", "skip_utah"])
 
         m.before_scenario(context, scenario)
 
         assert scenario.skip_message is None
-        assert context.has_bctl is True
 
 
 class TestCommonEnvironmentRequiresToggleAction:
@@ -302,6 +300,240 @@ class TestCommonEnvironmentRequiresToggleAction:
 
         assert result is True
         assert calls == ["ujust --show toggle-updates 2>/dev/null | grep -q 'ACTION_VALUE'"]
+
+
+class TestCommonEnvironmentRequiresCustomCommandList:
+    @staticmethod
+    def _stub_run_ssh(m, stdout, returncode, calls=None):
+        def _run_ssh(context, cmd, **kwargs):
+            if calls is not None:
+                calls.append(cmd)
+            return stdout, returncode
+
+        m.run_ssh = _run_ssh
+
+    def test_skips_on_ublue_os_image_when_extension_is_absent(self):
+        """Classic (ghcr.io/ublue-os) predates the contract: the probe decides."""
+        m = _import_common_environment()
+        self._stub_run_ssh(m, "['logomenu@aryan_k']", 0)
+        context = _ctx(
+            is_bluefin_image=True, is_projectbluefin_image=False,
+            has_brew=True, has_toggle_action=True, has_custom_command_list=None,
+        )
+        scenario = _Scenario(["requires_custom_command_list"])
+
+        m.before_scenario(context, scenario)
+
+        assert scenario.skip_message == "custom-command-list extension not enabled on this image"
+        assert context.has_custom_command_list is False
+
+    def test_does_not_skip_on_projectbluefin_image_when_extension_is_absent(self):
+        """projectbluefin owns the contract: no probe, no skip, a regression fails loudly."""
+        m = _import_common_environment()
+        calls = []
+        self._stub_run_ssh(m, "['logomenu@aryan_k']", 0, calls)
+        context = _ctx(
+            is_bluefin_image=True, is_projectbluefin_image=True,
+            has_brew=True, has_toggle_action=True, has_custom_command_list=None,
+        )
+        scenario = _Scenario(["requires_custom_command_list"])
+
+        m.before_scenario(context, scenario)
+
+        assert scenario.skip_message is None
+        assert calls == []
+        assert context.has_custom_command_list is None
+
+    def test_allows_when_image_enables_custom_command_list(self):
+        m = _import_common_environment()
+        self._stub_run_ssh(m, "['custom-command-list@storageb.github.com']", 0)
+        context = _ctx(
+            is_bluefin_image=True, is_projectbluefin_image=False,
+            has_brew=True, has_toggle_action=True, has_custom_command_list=None,
+        )
+        scenario = _Scenario(["requires_custom_command_list"])
+
+        m.before_scenario(context, scenario)
+
+        assert scenario.skip_message is None
+        assert context.has_custom_command_list is True
+
+    def test_does_not_skip_when_gsettings_fails(self):
+        """A broken gsettings is a defect, not a product gap: run the scenarios."""
+        m = _import_common_environment()
+        self._stub_run_ssh(m, "No such schema 'org.gnome.shell'", 1)
+        context = _ctx(
+            is_bluefin_image=True, is_projectbluefin_image=False,
+            has_brew=True, has_toggle_action=True, has_custom_command_list=None,
+        )
+        scenario = _Scenario(["requires_custom_command_list"])
+
+        m.before_scenario(context, scenario)
+
+        assert scenario.skip_message is None
+        assert context.has_custom_command_list is True
+
+    def test_probes_enabled_extensions_without_shell_pipeline(self):
+        m = _import_common_environment()
+        calls = []
+        self._stub_run_ssh(m, "['custom-command-list@storageb.github.com']", 0, calls)
+        context = _ctx(has_custom_command_list=None)
+
+        result = m._has_custom_command_list(context)
+
+        assert result is True
+        assert calls == ["gsettings get org.gnome.shell enabled-extensions"]
+
+
+class TestIsProjectbluefinImage:
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "ghcr.io/projectbluefin/bluefin:stable",
+            "ghcr.io/projectbluefin/bluefin-lts@sha256:abc123",
+            "ghcr.io/PROJECTBLUEFIN/dakota:testing",
+            "projectbluefin/bluefin",
+        ],
+    )
+    def test_matches_projectbluefin_org(self, image):
+        m = _import_common_environment()
+        assert m._is_projectbluefin_image(image) is True
+
+    @pytest.mark.parametrize(
+        "image",
+        [
+            "ghcr.io/ublue-os/bluefin:stable",
+            "ghcr.io/ublue-os/bluefin@sha256:abc123",
+            "ghcr.io/projectbluefin-fork/bluefin:stable",
+            "bluefin:stable",
+            "",
+        ],
+    )
+    def test_rejects_other_orgs_and_unknown_refs(self, image):
+        m = _import_common_environment()
+        assert m._is_projectbluefin_image(image) is False
+
+    @pytest.mark.parametrize(
+        ("image", "expected"),
+        [
+            ("ghcr.io/projectbluefin/bluefin-lts@sha256:abc123", True),
+            ("ghcr.io/ublue-os/bluefin:stable", False),
+            (None, False),
+        ],
+    )
+    def test_before_all_reads_the_image_ref_from_env(self, monkeypatch, image, expected):
+        """An unknown image ref (no IMAGE, no userdata) is not projectbluefin."""
+        m = _import_common_environment()
+        monkeypatch.delenv("BASE_IMAGE", raising=False)
+        if image is None:
+            monkeypatch.delenv("IMAGE", raising=False)
+        else:
+            monkeypatch.setenv("IMAGE", image)
+        context = _ctx()
+        context.config.userdata = {}
+
+        m.before_all(context)
+
+        assert context.is_projectbluefin_image is expected
+
+
+class TestBeforeAllPrefersBaseImage:
+    """before_all reads BASE_IMAGE before IMAGE (#907).
+
+    On composed runs IMAGE is ghcr.io/<owner>/testsuite-e2e:run-<id>, which
+    carries neither the family nor the org of the image under test.
+    """
+
+    COMPOSED = "ghcr.io/projectbluefin/testsuite-e2e:run-123"
+
+    @staticmethod
+    def _run(monkeypatch, base_image=None, image=None, userdata=None):
+        m = _import_common_environment()
+        for name, value in (("BASE_IMAGE", base_image), ("IMAGE", image)):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        context = _ctx()
+        context.config.userdata = userdata or {}
+        m.before_all(context)
+        return context
+
+    def test_base_image_wins_over_image(self, monkeypatch):
+        context = self._run(
+            monkeypatch,
+            base_image="ghcr.io/ublue-os/bluefin:stable",
+            image="ghcr.io/projectbluefin/bluefin:stable",
+        )
+
+        assert context.is_projectbluefin_image is False
+        assert context.is_bluefin_image is True
+
+    @pytest.mark.parametrize("base_image", [None, ""])
+    def test_image_is_used_when_base_image_is_unset_or_empty(self, monkeypatch, base_image):
+        context = self._run(
+            monkeypatch,
+            base_image=base_image,
+            image="ghcr.io/projectbluefin/dakota:testing",
+        )
+
+        assert context.is_projectbluefin_image is True
+        assert context.is_dakota_image is True
+        assert context.is_bluefin_image is False
+
+    def test_userdata_image_is_the_fallback(self, monkeypatch):
+        context = self._run(
+            monkeypatch,
+            userdata={"image": "ghcr.io/projectbluefin/bluefin:stable"},
+        )
+
+        assert context.is_projectbluefin_image is True
+        assert context.is_bluefin_image is True
+
+    def test_composed_run_detects_family_and_org_from_base_image(self, monkeypatch):
+        context = self._run(
+            monkeypatch,
+            base_image="ghcr.io/projectbluefin/bluefin-lts@sha256:abc123",
+            image=self.COMPOSED,
+        )
+
+        assert context.is_projectbluefin_image is True
+        assert context.is_bluefin_image is True
+        assert context.is_dakota_image is False
+
+    def test_composed_run_under_projectbluefin_owner_does_not_gate_a_classic_base(
+        self, monkeypatch
+    ):
+        """The composed ref's owner must not stand in for the base image's org."""
+        context = self._run(
+            monkeypatch,
+            base_image="ghcr.io/ublue-os/bluefin:stable",
+            image=self.COMPOSED,
+        )
+
+        assert context.is_projectbluefin_image is False
+        assert context.is_bluefin_image is True
+
+    def test_composed_ref_alone_has_no_family(self, monkeypatch):
+        """Without BASE_IMAGE the composed ref is what #907 describes: no family, no org."""
+        context = self._run(monkeypatch, image=self.COMPOSED)
+
+        assert context.is_bluefin_image is False
+        assert context.is_dakota_image is False
+
+    @pytest.mark.parametrize(
+        "base_image",
+        [
+            "ghcr.io/projectbluefin/utah@sha256:abc123",
+            "ghcr.io/projectbluefin/common:e2e-pr-42-abc",
+        ],
+    )
+    def test_common_layer_consumers_run_bluefin_scenarios(self, monkeypatch, base_image):
+        """Utah and common PR e2e ship common's bluefin tree; skipping them was a false green (#1073)."""
+        context = self._run(monkeypatch, base_image=base_image, image=self.COMPOSED)
+
+        assert context.is_bluefin_image is True
+        assert context.is_dakota_image is False
 
 
 class TestCommonEnvironmentBootcUnifiedStorage:
@@ -340,57 +572,6 @@ class TestCommonEnvironmentBootcUnifiedStorage:
         m.before_scenario(context, scenario)
 
         assert not any("restart bootc-unified-storage.service" in c for c in calls)
-
-
-class TestCommonEnvironmentDevmodeCleanup:
-    def test_disables_devmode_after_a_tagged_scenario(self):
-        m = _import_common_environment(run_ssh_returncode=0)
-        calls = []
-        m.run_ssh = lambda context, cmd, **kw: (calls.append(cmd), ("", 0))[1]
-        context = _ctx()
-        scenario = _Scenario(["devmode_cleanup"])
-        scenario.status = "passed"
-
-        m.after_scenario(context, scenario)
-
-        assert calls == ["bctl devmode --disable"]
-
-    def test_skips_cleanup_for_untagged_scenarios(self):
-        m = _import_common_environment(run_ssh_returncode=0)
-        calls = []
-        m.run_ssh = lambda context, cmd, **kw: (calls.append(cmd), ("", 0))[1]
-        context = _ctx()
-        scenario = _Scenario(["requires_bctl"])
-        scenario.status = "passed"
-
-        m.after_scenario(context, scenario)
-
-        assert calls == []
-
-    def test_skips_cleanup_when_scenario_was_skipped(self):
-        m = _import_common_environment(run_ssh_returncode=0)
-        calls = []
-        m.run_ssh = lambda context, cmd, **kw: (calls.append(cmd), ("", 0))[1]
-        context = _ctx()
-        scenario = _Scenario(["devmode_cleanup"])
-        scenario.status = "skipped"
-
-        m.after_scenario(context, scenario)
-
-        assert calls == []
-
-    def test_cleanup_failure_does_not_mask_the_real_failure(self):
-        m = _import_common_environment(run_ssh_returncode=0)
-
-        def _boom(context, cmd, **kw):
-            raise RuntimeError("ssh transport died")
-
-        m.run_ssh = _boom
-        context = _ctx()
-        scenario = _Scenario(["devmode_cleanup"])
-        scenario.status = "failed"
-
-        m.after_scenario(context, scenario)  # should not raise
 
 
 # ---------------------------------------------------------------------------

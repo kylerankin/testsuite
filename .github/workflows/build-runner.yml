@@ -4,11 +4,17 @@
 #
 # Triggered when:
 #   - container/Containerfile.runner changes (new deps)
+#   - .github/workflows/build-runner.yml changes (action refs, step edits)
 #   - Weekly on Monday (keeps base OS + pip packages fresh)
 #   - Manual dispatch
 #
 # Consumers: .github/workflows/e2e.yml pulls this image on the ubuntu runner
 # and pipes it into the QEMU VM to skip slow in-VM pip installs.
+#
+# Validated on pull_request so a base-image (Containerfile) digest bump that breaks
+# the microdnf steps surfaces at PR time, not only after merge or on next week's
+# cron tick. On pull_request the build runs but does not push to the mutable
+# `runner` tag (see `push:` below); only push to main publishes.
 
 name: Build test runner image
 
@@ -17,6 +23,12 @@ on:
     branches: [main]
     paths:
       - container/Containerfile.runner
+      - .github/workflows/build-runner.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - container/Containerfile.runner
+      - .github/workflows/build-runner.yml
   schedule:
     - cron: "0 3 * * 1"   # weekly Monday 03:00 UTC — keep base + pip deps fresh
   workflow_dispatch:
@@ -36,22 +48,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           file: container/Containerfile.runner
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ghcr.io/projectbluefin/testsuite:runner
             ghcr.io/projectbluefin/testsuite:runner-${{ github.sha }}
@@ -60,4 +72,5 @@ jobs:
           platforms: linux/amd64
 
       - name: Image digest
+        if: github.event_name != 'pull_request'
         run: echo "Pushed ghcr.io/projectbluefin/testsuite:runner @ ${{ steps.build.outputs.digest }}"

@@ -7,6 +7,13 @@ GSettings-focused checks over SSH against a live Bluefin session.
 import os
 import shlex
 
+from tests.shared.image_family import (
+    image_under_test,
+    is_bluefin_image as _is_bluefin_image,
+    is_dakota_image as _is_dakota_image,
+    is_utah_image as _is_utah_image,
+)
+from tests.shared.ssh_config import _first_value
 from tests.shared.ssh_steps import *  # noqa: F401,F403
 from tests.shared.ssh_steps import run_ssh
 
@@ -20,36 +27,15 @@ except Exception:  # noqa: BLE001
         return None
 
 
-def _first_value(*values: str) -> str:
-    for value in values:
-        if value:
-            return value
-    return ""
+def _is_projectbluefin_image(image: str) -> bool:
+    """Return True if the image reference is published under the projectbluefin org.
 
-
-def _is_bluefin_image(image: str) -> bool:
-    """Return True if the image reference looks like a Bluefin image.
-
-    Matches the image name component only (e.g. "bluefin" in
-    "ghcr.io/projectbluefin/bluefin:testing") to avoid false-positives where
-    the org name "projectbluefin" would match a dakota image URL.
+    Matches the org path segment only (e.g. "projectbluefin" in
+    "ghcr.io/projectbluefin/bluefin-lts@sha256:..."), so Classic under
+    ghcr.io/ublue-os, a bare image name and an empty ref all return False.
     """
-    lower = image.lower()
-    # Extract image name: last path segment before any tag/digest
-    name = lower.split("/")[-1].split(":")[0].split("@")[0]
-    return "bluefin" in name or "bazzite" in lower
-
-
-def _is_dakota_image(image: str) -> bool:
-    """Return True if the image reference looks like a Dakota image.
-
-    Matches the image name component only (e.g. "dakota" in
-    "ghcr.io/projectbluefin/dakota:testing") to avoid false-positives where
-    the org name "projectbluefin" would match a Bluefin image URL.
-    """
-    lower = image.lower()
-    name = lower.split("/")[-1].split(":")[0].split("@")[0]
-    return "dakota" in name
+    parts = image.lower().split("/")
+    return len(parts) >= 2 and parts[-2] == "projectbluefin"
 
 
 def _scenario_tags(scenario) -> set[str]:
@@ -76,22 +62,6 @@ def _is_container_target(context) -> bool:
     return context.is_container_target
 
 
-def _has_bctl(context) -> bool:
-    """Return True when bluefinctl (`bctl`) is installed on the VM.
-
-    bluefinctl ships via the Homebrew preinstall set, and brew-setup.service is
-    masked in QEMU CI, so `bctl` is absent there. Scenarios tagged
-    ``@requires_bctl`` skip with an explicit reason rather than failing on a
-    missing binary.
-    """
-    cached = getattr(context, "has_bctl", None)
-    if cached is not None:
-        return cached
-    _, returncode = run_ssh(context, "command -v bctl")
-    context.has_bctl = returncode == 0
-    return context.has_bctl
-
-
 def _has_toggle_action(context) -> bool:
     """Return True when the image's toggle-updates recipe honors ACTION.
 
@@ -115,13 +85,49 @@ def _has_toggle_action(context) -> bool:
     return context.has_toggle_action
 
 
+def _has_custom_command_list(context) -> bool:
+    """Return True when the effective enabled-extensions lists custom-command-list.
+
+    projectbluefin/common replaced Logo Menu with ``custom-command-list``
+    (``zz0-bluefin-modifications.gschema.override`` + the distro dconf default
+    in ``04-bluefin-custom-command-menu``). Images that build on an older
+    common layer, e.g. ``ghcr.io/ublue-os/bluefin`` (Classic), still ship
+    Logo Menu and carry no custom-command-list dconf keys, so the scenarios
+    asserting that swap fail there for a product reason rather than a defect.
+    Probe the image's effective ``enabled-extensions`` value (``gsettings
+    get``, which a user override can change): scenarios tagged
+    ``@requires_custom_command_list`` skip until the image ships the
+    contract, then activate automatically. A failing ``gsettings`` (missing
+    schema, broken dconf/D-Bus, no binary) is a defect rather than a product
+    gap, so it does not skip — the scenarios run and report it. Images under
+    ``ghcr.io/projectbluefin/*`` own the contract, so ``before_scenario`` never
+    consults this probe for them: dropping the extension there fails loudly.
+    An unknown image ref falls back to the probe.
+    """
+    cached = getattr(context, "has_custom_command_list", None)
+    if cached is not None:
+        return cached
+    stdout, returncode = run_ssh(context, "gsettings get org.gnome.shell enabled-extensions")
+    if returncode != 0:
+        context.has_custom_command_list = True
+    else:
+        context.has_custom_command_list = (
+            "custom-command-list@storageb.github.com" in (stdout or "")
+        )
+    return context.has_custom_command_list
+
+
 def before_all(context):
     userdata = context.config.userdata
-    # When IMAGE env var is set (GHA runner), auto-detect image family so
-    # @bluefin scenarios can be skipped gracefully on non-Bluefin images.
-    image_ref = os.environ.get("IMAGE", userdata.get("image", ""))
+    # Auto-detect the image family so @bluefin scenarios skip on non-Bluefin
+    # images. image_under_test() prefers BASE_IMAGE: on composed runs IMAGE is
+    # the derived ghcr.io/<owner>/testsuite-e2e:run-<id> ref, which carries
+    # neither the family nor the org of the image under test (#907).
+    image_ref = image_under_test(userdata)
     context.is_bluefin_image = _is_bluefin_image(image_ref) if image_ref else True
     context.is_dakota_image = _is_dakota_image(image_ref) if image_ref else False
+    context.is_projectbluefin_image = _is_projectbluefin_image(image_ref)
+    context.is_utah_image = _is_utah_image(image_ref) if image_ref else False
     context.vm_ip = _first_value(
         userdata.get("vm_ip", ""),
         userdata.get("host", ""),
@@ -183,7 +189,6 @@ def before_all(context):
     context.last_ssh_result = None
     context.ssh_rc = 0
     context.has_brew = None
-    context.has_bctl = None
 
 
 def before_scenario(context, scenario):
@@ -208,14 +213,22 @@ def before_scenario(context, scenario):
             f"(IMAGE={os.environ.get('IMAGE', 'unknown')})"
         )
         return
+    # Temporary: drop @skip_utah once #1076 replaces the scenarios it gates.
+    if "skip_utah" in scenario_tags and getattr(context, "is_utah_image", False):
+        scenario.skip("Skipping @skip_utah scenario: Utah's common pin no longer ships it")
+        return
     if "requires_brew" in scenario_tags and not _has_brew(context):
         scenario.skip("Homebrew not present on this image")
         return
-    if "requires_bctl" in scenario_tags and not _has_bctl(context):
-        scenario.skip("bluefinctl (bctl) not present on this image")
-        return
     if "requires_toggle_action" in scenario_tags and not _has_toggle_action(context):
         scenario.skip("ujust toggle-updates ACTION support not present on this image")
+        return
+    if (
+        "requires_custom_command_list" in scenario_tags
+        and not getattr(context, "is_projectbluefin_image", False)
+        and not _has_custom_command_list(context)
+    ):
+        scenario.skip("custom-command-list extension not enabled on this image")
         return
     feature_name = getattr(getattr(scenario, "feature", None), "name", "")
     if _is_container_target(context):
@@ -235,6 +248,13 @@ def before_scenario(context, scenario):
                 context,
                 "sudo systemctl restart bootc-unified-storage.service --no-block 2>/dev/null || true",
             )
+    if "podman user socket" in getattr(scenario, "name", "").lower():
+        user = getattr(context, "ssh_user", None) or os.environ.get("SSH_USER", "bluefin-test")
+        run_ssh(
+            context,
+            f"sudo loginctl enable-linger {shlex.quote(user)} 2>/dev/null || true; "
+            "systemctl --user start podman.socket 2>/dev/null || true",
+        )
     context.command_stdout = ""
     context.last_command_output = ""
     context.last_ssh_result = None
@@ -242,25 +262,5 @@ def before_scenario(context, scenario):
     record_start(context)
 
 
-def _cleanup_devmode(context, scenario) -> None:
-    """Restore devmode to inactive after a @devmode_cleanup scenario.
-
-    The devmode mutation scenario changes durable system state (group
-    membership), so teardown must not live in trailing scenario steps: a
-    failure part-way through would leak an enabled devmode into the next run
-    or retry. Skipped scenarios never mutated anything, so they are ignored.
-    """
-    if "devmode_cleanup" not in _scenario_tags(scenario):
-        return
-    status = getattr(scenario, "status", None)
-    if getattr(status, "name", status) == "skipped":
-        return
-    try:
-        run_ssh(context, "bctl devmode --disable")
-    except Exception:  # noqa: BLE001 - teardown must never mask the real failure
-        pass
-
-
 def after_scenario(context, scenario):
-    _cleanup_devmode(context, scenario)
     record_end(context, scenario)

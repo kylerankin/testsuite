@@ -1,9 +1,9 @@
 # testsuite QA review
 
-Coverage snapshot and known gaps live in `docs/skills/test-authoring/suite-map/SKILL.md`. Read that file for the current per-suite matrix and `@future` stub list rather than duplicating counts here.
+Coverage snapshot and known gaps live in `docs/skills/test-authoring/suite-map/SKILL.md`. Read that file for the current per-suite matrix, authoritative counts, and `@future` stub list rather than duplicating counts here.
 
-The current branch's mechanical recount is 506 scenarios across 69 feature files:
-394 active, 0 `@quarantine`, 112 `@future`/`@pending`/`@hardware_blocked`. The five active
+The current branch's mechanical recount is 548 scenarios across 75 feature files:
+438 active, 0 `@quarantine`, 110 `@future`/`@pending`/`@hardware_blocked` (see the generated snapshot in `docs/skills/test-authoring/suite-map/SKILL.md`). The five active
 sudo-rs scenarios are included in the smoke total there.
 
 ## What this repo is responsible for
@@ -52,6 +52,7 @@ Run unit tests with `python3 -m pytest tests/unit/ -q`. The `pytest` CI check (`
 
 | File | What it covers |
 |---|---|
+| `test_gnomeos_canary.py` | GNOME OS identity/session rejection, AT-SPI fallback rejection, strict result/process gate and evidence wiring |
 | `test_gnome_shell_steps.py` | Shell.Eval, AT-SPI step helpers, ShellEval bool variants |
 | `test_gnome_settings_steps.py` | Settings panel navigation and toggle helpers |
 | `test_lifecycle_steps.py` | bootc upgrade/rollback/migration step helpers |
@@ -59,6 +60,7 @@ Run unit tests with `python3 -m pytest tests/unit/ -q`. The `pytest` CI check (`
 | `test_timing.py` | SLA tag thresholds and timing helpers |
 | `test_screenshot.py` | Screenshot capture helpers |
 | `test_shared.py` | Shared step utilities |
+| `test_convert_behave_cli.py` | Behave converter CLI argument-count boundary, usage diagnostics, and successful output |
 | `test_screenshot_cli.py` | `screenshot_cli.main()` argument parsing and dispatch |
 | `test_security_steps.py` | `_cosign_entries()` JSON validation and `_collect_values()` recursive extraction |
 | `test_quarantine.py` | `@quarantine` / `@pending` / `@future` skip logic |
@@ -68,7 +70,6 @@ Run unit tests with `python3 -m pytest tests/unit/ -q`. The `pytest` CI check (`
 | `test_brew_steps.py` | Brew step helpers and formula detection |
 | `test_gnome_notifications_steps.py` | Notification step helpers |
 | `test_retry.py` | Behave retry harness, `sys.executable` fallback |
-| `test_parse_results.py` | `scripts/parse_results.py` parsing integration |
 | `test_quarantine_age.py` | `scripts/check_quarantine_age.py` parsing and reporting |
 | `test_orca_steps.py` | Orca screen-reader toggle steps, `_wait_for_orca` polling, restore semantics |
 | `test_input_methods_steps.py` | `_run_in_vm` dispatch, exact `uint32` index parsing, success-latched input-source restore |
@@ -82,4 +83,4 @@ Run unit tests with `python3 -m pytest tests/unit/ -q`. The `pytest` CI check (`
 - `flatcar/lifecycle`: 6 scenarios, 5 active — knuckle install, Ignition first-boot verification, update channel, automatic-update disable via `update.conf`, and afterburn implemented. Only the boot-order swap remains `@future`: booting the installed target disk requires KubeVirt boot-device ordering owned by `projectbluefin/lab`, and without it a reboot silently returns to the live disk. The suite is not yet reachable from `e2e.yml` (tracked in #704).
 - `security/selinux`: all scenarios active (cosign verification across image variants).
 - `nvidia`: still `@future` / `@hardware_blocked` until GPU passthrough exists in the lab.
-- `kde-smoke`: 13 `@informational` scenarios in one feature file (repo totals: 491 scenarios / 64 feature files by mechanical recount; see the count-drift notice in `suite-map/SKILL.md`); Aurora-only Phase-2 harness proof. The shared KDE helpers and `e2e.yml` suite registration it depends on landed in #641-#645.
+- `kde-smoke`: 13 `@informational` scenarios in one feature file; Aurora-only Phase-2 harness proof. The shared KDE helpers and `e2e.yml` suite registration it depends on landed in #641-#645.

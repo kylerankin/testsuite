@@ -13,9 +13,12 @@ qecore-headless (invoked by the Argo runner) handles:
 import os
 import sys
 import traceback
-
 import re as _re
 import subprocess as _subprocess
+
+from tests.shared.failed_setup import record_failed_setup, write_failed_setup_marker
+from tests.shared.image_family import image_under_test, is_bluefin_image, is_dakota_image
+from tests.shared.results_dir import resolve_results_dir
 
 try:
     from qecore.sandbox import TestSandbox
@@ -33,6 +36,8 @@ try:
     from steps.app_support import launch_target_available
 except ImportError:
     from tests.smoke.features.steps.app_support import launch_target_available
+
+from tests.shared.runtime_env import in_container_lane
 
 # ── qecore keyboard key mapping patch ────────────────────────────────────────
 # qecore 4.16 keyboard_key_combo_input builds uinput key names as
@@ -142,6 +147,7 @@ def _char_to_uinput_event(char: str):
     qecore, which unpacks event as (ev_type, ev_code) and crashes with TypeError.
     """
     return _CHAR_TO_EVDEV.get(char)
+
 
 
 def _emit_characters_to_device(device, characters: str) -> None:
@@ -308,6 +314,25 @@ OPTIONAL_SCENARIO_TARGETS = {
 }
 
 
+def _detect_image_family(context) -> None:
+    """Set is_bluefin_image / is_dakota_image for variant-tagged scenarios.
+
+    Composed runs replace IMAGE with ghcr.io/<owner>/testsuite-e2e:run-<id>,
+    which carries no family, so image_under_test() checks BASE_IMAGE first,
+    then IMAGE, then ``-D image=``. The GUI runner container always sets
+    IMAGE, so ``-D image=`` only applies to local runs without it. Only the
+    image name is matched, so the "projectbluefin" org cannot false-positive.
+    """
+    userdata = getattr(getattr(context, "config", None), "userdata", None)
+    image_ref = image_under_test(userdata if isinstance(userdata, dict) else None)
+    if image_ref:
+        context.is_bluefin_image = is_bluefin_image(image_ref)
+        context.is_dakota_image = is_dakota_image(image_ref)
+    else:
+        context.is_bluefin_image = True  # default to Bluefin when no image is known
+        context.is_dakota_image = False
+
+
 def before_all(context) -> None:
     import time
     import subprocess
@@ -355,6 +380,22 @@ def before_all(context) -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: unable to enable toolkit-accessibility: {exc}", flush=True)
 
+    # Suppress session idle-lock so long smoke runs do not trigger the lock screen
+    # and block AT-SPI from querying panel elements.
+    try:
+        _subprocess.run(
+            ["gsettings", "set", "org.gnome.desktop.session", "idle-delay", "0"],
+            check=False,
+            timeout=5,
+        )
+        _subprocess.run(
+            ["gsettings", "set", "org.gnome.desktop.screensaver", "lock-enabled", "false"],
+            check=False,
+            timeout=5,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: unable to suppress session idle-lock: {exc}", flush=True)
+
     # In container sessions without full portal backend, mask xdg-desktop-portal
     # to avoid 25s GIO portal activation timeouts on application launch.
     try:
@@ -372,6 +413,19 @@ def before_all(context) -> None:
     # When running inside the runner container, the systemd user session bus is
     # cgroup-restricted — forward the gdbus call to the VM via SSH instead.
     from steps.app_support import _IN_CONTAINER, _ssh_run
+
+    # When running inside the runner container, also forward the idle-delay and
+    # screensaver suppression settings to the host VM session via SSH.
+    if _IN_CONTAINER:
+        try:
+            _ssh_run(
+                "source /tmp/session.env 2>/dev/null; "
+                "gsettings set org.gnome.desktop.session idle-delay 0; "
+                "gsettings set org.gnome.desktop.screensaver lock-enabled false",
+                timeout=5,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: unable to suppress session idle-lock via SSH: {exc}", flush=True)
 
     for attempt in range(3):
         try:
@@ -472,18 +526,7 @@ def before_all(context) -> None:
     else:
         print("WARNING: clock/system toggles not found after 15s — proceeding anyway", flush=True)
 
-    # Detect image family so variant-tagged scenarios can be skipped on the
-    # wrong image. Match only the image name component (last path segment before
-    # ':' or '@') — the org "projectbluefin" must not be treated as an image name.
-    image_ref = os.environ.get("IMAGE", "")
-    if image_ref:
-        _lower = image_ref.lower()
-        _name = _lower.split("/")[-1].split(":")[0].split("@")[0]
-        context.is_bluefin_image = "bluefin" in _name or "bazzite" in _name
-        context.is_dakota_image = "dakota" in _name
-    else:
-        context.is_bluefin_image = True  # default to Bluefin when IMAGE is unset
-        context.is_dakota_image = False
+    _detect_image_family(context)
 
     try:
         context.optional_scenario_availability = {
@@ -507,7 +550,7 @@ def before_all(context) -> None:
         _dismiss_welcome_dialog()
     except Exception as error:
         print(f"Environment error: before_all: {error}", flush=True)
-        context.failed_setup = traceback.format_exc()
+        record_failed_setup(context, traceback.format_exc())
 
 
 def before_scenario(context, scenario) -> None:
@@ -522,6 +565,13 @@ def before_scenario(context, scenario) -> None:
     if skip_quarantine(scenario):
         return
 
+    # qecore only clears _scenario_skipped inside sandbox.before_scenario(),
+    # but the app-availability gate below (firefox, etc.) returns before that
+    # call. Notify it here so after_all doesn't assert "No scenario matched
+    # tags" when every scenario skips early (same pattern as dx).
+    if getattr(context, "sandbox", None) is not None:
+        context.sandbox._scenario_skipped = False
+
     # Skip Wi-Fi tests when no wireless hardware is present (e.g. QEMU VMs).
     if "wifi" in set(getattr(scenario, "effective_tags", scenario.tags)):
         if not _has_wifi_interface():
@@ -533,6 +583,18 @@ def before_scenario(context, scenario) -> None:
             return
 
     scenario_tags = set(getattr(scenario, "effective_tags", scenario.tags))
+
+    # Skip @vm_only scenarios in container lanes. Those scenarios drive the
+    # device under test over SSH, but a container lane runs behave inside the
+    # target itself and has no sshd — the resulting connection failure is a
+    # runner limitation, not an image regression.
+    if "vm_only" in scenario_tags and in_container_lane():
+        try:
+            scenario.skip("Skipping @vm_only scenario in a container lane (no SSH target)")
+        except TypeError:
+            scenario.skip()
+        print(f"Skipping {scenario.name}: @vm_only scenario in a container lane", flush=True)
+        return
 
     # Skip @bluefin scenarios on non-Bluefin images (e.g. dakota).
     if not getattr(context, "is_bluefin_image", True):
@@ -591,6 +653,7 @@ def before_scenario(context, scenario) -> None:
         # removed SetUnsafeMode).  Mark setup as failed so all remaining
         # scenarios are skipped and after_scenario doesn't call the broken sandbox.
         context.failed_setup = "qecore-headless startup failed: unrecoverable headless errors"
+        write_failed_setup_marker(context, context.failed_setup)
         context.scenario.skip(reason=context.failed_setup)
         return
     except (RuntimeError, AttributeError) as e:
@@ -616,6 +679,12 @@ def after_scenario(context, scenario) -> None:
         _restore_display_scale(context)
     except Exception as e:  # noqa: BLE001
         print(f"WARNING: display scaling cleanup failed: {e}", flush=True)
+    # Return GNOME extensions toggled by the scenario to their shipped state.
+    try:
+        from steps.power_status_color_steps import restore_extension_states
+        restore_extension_states(context)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARNING: extension state cleanup failed: {e}", flush=True)
     record_end(context, scenario)
     if scenario.status.name in ('passed', 'failed'):
         configure_screenshot_context(context, SUITE_NAME, scenario.name)
@@ -654,7 +723,8 @@ def after_all(context) -> None:
 
     try:
         import os
-        if os.path.exists("/tmp/results/atspi_tree.txt"):
+        results_dir = resolve_results_dir(context)
+        if os.path.exists(os.path.join(results_dir, "atspi_tree.txt")):
             return  # already written by after_scenario
         shell = context.sandbox.shell
         lines = []
@@ -662,8 +732,8 @@ def after_all(context) -> None:
             lines.append(f"role={child.roleName!r:30} name={child.name!r}")
             for gc in child.children[:20]:
                 lines.append(f"  role={gc.roleName!r:30} name={gc.name!r}")
-        os.makedirs("/tmp/results", exist_ok=True)
-        with open("/tmp/results/atspi_tree.txt", "w") as f:
+        os.makedirs(results_dir, exist_ok=True)
+        with open(os.path.join(results_dir, "atspi_tree.txt"), "w") as f:
             f.write("\n".join(lines))
     except Exception:   # noqa: BLE001
         pass

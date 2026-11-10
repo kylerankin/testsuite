@@ -30,6 +30,135 @@ def _import_lifecycle_steps():
     return m
 
 
+class TestRequiredLifecycleVerdict:
+    """Targeted qualification must not turn skipped assertions into a pass."""
+
+    def setup_method(self):
+        # The environment imports SSH decorators; reuse the isolated step stub.
+        _import_lifecycle_steps()
+        sys.modules.pop("tests.lifecycle.features.environment", None)
+        import tests.lifecycle.features.environment as environment
+        self.mod = environment
+
+    @staticmethod
+    def scenario(status="passed", step_status="passed", required=True, tags=()):
+        return types.SimpleNamespace(
+            name="upgrade and rollback",
+            effective_tags=list(tags),
+            status=types.SimpleNamespace(name=status),
+            steps=[types.SimpleNamespace(
+                name=("bootc upgrade output indicates image was staged"
+                      if required else "optional capability probe"),
+                status=types.SimpleNamespace(name=step_status),
+            )],
+        )
+
+    @staticmethod
+    def features(*scenarios):
+        return [types.SimpleNamespace(walk_scenarios=lambda: iter(scenarios))]
+
+    def test_required_pass_with_optional_skip_qualifies(self):
+        self.mod._assert_required_lifecycle_passed(self.features(
+            self.scenario(), self.scenario("skipped", "skipped", required=False),
+        ))
+
+    @pytest.mark.parametrize("status", ["skipped", "untested", "failed", "undefined", "error"])
+    def test_nonpassing_required_scenario_fails_even_with_other_passes(self, status):
+        with pytest.raises(AssertionError, match="upgrade and rollback"):
+            self.mod._assert_required_lifecycle_passed(self.features(
+                self.scenario(), self.scenario(status),
+            ))
+
+    def test_skipped_required_step_cannot_hide_under_passing_scenario(self):
+        with pytest.raises(AssertionError, match="skipped or incomplete"):
+            self.mod._assert_required_lifecycle_passed(self.features(
+                self.scenario(step_status="skipped"),
+            ))
+
+    @pytest.mark.parametrize("tag", ["pending", "future", "quarantine", "hardware_blocked"])
+    def test_parked_required_scenario_is_not_required(self, tag):
+        # A skip-tagged scenario never runs (tests/shared/quarantine.py), so its
+        # skipped staging step must not fail a healthy targeted run.
+        self.mod._assert_required_lifecycle_passed(self.features(
+            self.scenario(), self.scenario("skipped", "skipped", tags=[tag]),
+        ))
+
+    def test_only_parked_required_scenarios_cannot_qualify(self):
+        with pytest.raises(AssertionError, match="no required upgrade scenarios"):
+            self.mod._assert_required_lifecycle_passed(self.features(
+                self.scenario("skipped", "skipped", tags=["pending"]),
+            ))
+
+    def test_no_required_scenarios_cannot_qualify(self):
+        with pytest.raises(AssertionError, match="no required upgrade scenarios"):
+            self.mod._assert_required_lifecycle_passed(self.features(
+                self.scenario(required=False),
+            ))
+
+    def test_targeted_run_checks_complete_model_including_filtered_scenarios(self, monkeypatch):
+        monkeypatch.setenv("TARGET_IMAGE", "ghcr.io/projectbluefin/bluefin@sha256:candidate")
+        context = types.SimpleNamespace(_runner=types.SimpleNamespace(
+            features=self.features(self.scenario(), self.scenario("skipped")),
+        ))
+        with pytest.raises(AssertionError, match="Lifecycle qualification"):
+            self.mod.after_all(context)
+
+    @pytest.mark.parametrize("target, tags, skip, expected_rc", [
+        ("candidate", [], True, 1),
+        ("candidate", ["--tags", "~required"], True, 1),
+        ("candidate", [], False, 0),
+        ("", [], True, 0),
+    ])
+    def test_real_behave_exit_status(self, tmp_path, target, tags, skip, expected_rc):
+        """An after_all failure must reach the existing workflow's exit code."""
+        import os
+        from pathlib import Path
+        import subprocess
+
+        root = Path(__file__).resolve().parents[1]
+        features = tmp_path / "features"
+        (features / "steps").mkdir(parents=True)
+        (features / "environment.py").write_text(
+            (root / "lifecycle/features/environment.py").read_text()
+        )
+        (features / "steps/probe.py").write_text(
+            'from behave import step\n'
+            '@step("a passing probe")\n'
+            'def passed(context): pass\n'
+            '@step("bootc upgrade output indicates image was staged")\n'
+            'def skipped(context): '
+            + ('context.scenario.skip("probe unavailable")\n' if skip else 'pass\n')
+        )
+        (features / "probe.feature").write_text(
+            'Feature: verdict probe\n'
+            '  Scenario: unrelated pass\n'
+            '    * a passing probe\n'
+        )
+        (features / "required.feature").write_text(
+            '@required\n'
+            'Feature: required upgrade evidence\n'
+            '  Scenario: required upgrade\n'
+            '    * bootc upgrade output indicates image was staged\n'
+        )
+        env = {**os.environ, "TARGET_IMAGE": target, "PYTHONPATH": str(root.parent)}
+        result = subprocess.run(
+            [sys.executable, "-m", "behave", str(features), *tags],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == expected_rc, result.stdout + result.stderr
+        if expected_rc:
+            assert "Lifecycle qualification" in result.stdout + result.stderr
+
+    @pytest.mark.parametrize("target", [None, "", " "])
+    def test_exploratory_and_manual_runs_preserve_skips(self, monkeypatch, target):
+        if target is None:
+            monkeypatch.delenv("TARGET_IMAGE", raising=False)
+        else:
+            monkeypatch.setenv("TARGET_IMAGE", target)
+        # No parsed model is needed for a non-qualification run.
+        self.mod.after_all(types.SimpleNamespace())
+
+
 class TestParseBootcStatus:
     def setup_method(self):
         self.mod = _import_lifecycle_steps()
@@ -145,3 +274,434 @@ class TestValidFedoraVersion:
     @pytest.mark.parametrize("version", ["40.1", "rawhide", "", None, "40a", "abc"])
     def test_rejects_non_numeric_version_strings(self, version):
         assert self.mod._valid_fedora_version(version) is False
+
+
+class TestUpgradeOutputStaged:
+    """The upgrade-staged step is a mandatory qualification gate: a no-op
+    upgrade must fail hard, not skip, so a run cannot pass without exercising
+    a real upgrade to a distinct candidate digest."""
+
+    def setup_method(self):
+        self.mod = _import_lifecycle_steps()
+
+    def test_passes_when_a_new_image_was_queued(self):
+        context = MagicMock(command_stdout="Queued for next boot: sha256:aaaa")
+
+        # Must not raise — a real upgrade was staged.
+        self.mod.upgrade_output_staged(context)
+
+    def test_passes_when_staged_update_already_present(self):
+        # bootc prints this when the staged deployment already matches the
+        # fetched digest (prior scenario on same VM, or CI pre-staging).
+        context = MagicMock(command_stdout="Staged update present, not changed\n")
+
+        self.mod.upgrade_output_staged(context)
+
+    def test_fails_when_no_update_available(self):
+        context = MagicMock(command_stdout="No update available.")
+
+        with pytest.raises(AssertionError, match="no-op"):
+            self.mod.upgrade_output_staged(context)
+
+    def test_fails_when_output_is_empty(self):
+        context = MagicMock(command_stdout="")
+
+        with pytest.raises(AssertionError, match="no-op"):
+            self.mod.upgrade_output_staged(context)
+
+    def test_failure_message_names_the_bootc_output(self):
+        context = MagicMock(command_stdout="Already up to date.")
+
+        with pytest.raises(AssertionError, match="Already up to date."):
+            self.mod.upgrade_output_staged(context)
+
+
+class TestMaybeRebootAfterUpgrade:
+    def setup_method(self):
+        self.mod = _import_lifecycle_steps()
+
+    @pytest.mark.parametrize(
+        "output",
+        ["Queued for next boot: sha256:aaaa", "Staged update present, not changed"],
+    )
+    def test_reboots_on_any_staged_marker(self, monkeypatch, output):
+        reboot = MagicMock()
+        monkeypatch.setattr(self.mod, "reboot_and_wait", reboot)
+
+        self.mod.maybe_reboot_after_upgrade(MagicMock(command_stdout=output))
+
+        reboot.assert_called_once()
+
+    def test_does_not_reboot_on_noop(self, monkeypatch):
+        reboot = MagicMock()
+        monkeypatch.setattr(self.mod, "reboot_and_wait", reboot)
+
+        self.mod.maybe_reboot_after_upgrade(MagicMock(command_stdout="No update available."))
+
+        reboot.assert_not_called()
+
+
+def _bootc_status(booted, rollback=None, staged=None, staged_ref=None):
+    def deployment(digest, ref=None):
+        if digest is None:
+            return None
+        image = {"imageDigest": digest}
+        if ref:
+            image["image"] = {"image": ref, "transport": "registry"}
+        return {"image": image}
+
+    import json
+
+    return json.dumps(
+        {
+            "status": {
+                "booted": deployment(booted),
+                "rollback": deployment(rollback),
+                "staged": deployment(staged, staged_ref),
+            }
+        }
+    )
+
+
+class TestRestorePreUpgradeBaseline:
+    """Lifecycle scenarios share one VM; each gated upgrade scenario must start
+    from the pre-upgrade baseline so its bootc upgrade is a real upgrade."""
+
+    def setup_method(self):
+        self.mod = _import_lifecycle_steps()
+        self.commands = []
+
+    def _fake_run_ssh(self, statuses):
+        statuses = list(statuses)
+
+        def run_ssh(context, cmd, timeout=60):
+            self.commands.append(cmd)
+            if cmd == "sudo bootc status --format=json":
+                out = statuses.pop(0)
+            else:
+                out = ""
+            context.command_stdout = out
+            return out, 0
+
+        return run_ssh
+
+    def _context(self, baseline):
+        return types.SimpleNamespace(command_stdout="", lifecycle_baseline=baseline)
+
+    def test_first_call_records_baseline_without_mutating(self, monkeypatch):
+        monkeypatch.setattr(
+            self.mod,
+            "run_ssh",
+            self._fake_run_ssh([_bootc_status("sha256:base", staged="sha256:cand", staged_ref="ghcr.io/x:cand")]),
+        )
+        reboot = MagicMock()
+        monkeypatch.setattr(self.mod, "reboot_and_wait", reboot)
+        context = self._context({})
+
+        self.mod.restore_pre_upgrade_baseline(context)
+
+        assert context.lifecycle_baseline == {"digest": "sha256:base"}
+        assert self.commands == ["sudo bootc status --format=json"]
+        reboot.assert_not_called()
+
+    def test_noop_when_still_on_baseline(self, monkeypatch):
+        monkeypatch.setattr(
+            self.mod, "run_ssh", self._fake_run_ssh([_bootc_status("sha256:base", staged="sha256:cand")])
+        )
+        reboot = MagicMock()
+        monkeypatch.setattr(self.mod, "reboot_and_wait", reboot)
+        context = self._context({"digest": "sha256:base"})
+
+        self.mod.restore_pre_upgrade_baseline(context)
+
+        assert self.commands == ["sudo bootc status --format=json"]
+        reboot.assert_not_called()
+
+    def test_rolls_back_and_reboots_when_booted_on_candidate(self, monkeypatch):
+        monkeypatch.setattr(
+            self.mod,
+            "run_ssh",
+            self._fake_run_ssh(
+                [
+                    _bootc_status("sha256:cand", rollback="sha256:base"),
+                    _bootc_status("sha256:base", rollback="sha256:cand"),
+                ]
+            ),
+        )
+        reboot = MagicMock()
+        monkeypatch.setattr(self.mod, "reboot_and_wait", reboot)
+        context = self._context({"digest": "sha256:base"})
+
+        self.mod.restore_pre_upgrade_baseline(context)
+
+        assert "sudo bootc rollback" in self.commands
+        reboot.assert_called_once_with(context)
+        assert not any("bootc switch" in c for c in self.commands)
+
+    def test_does_not_restage_prestaged_candidate_after_rollback(self, monkeypatch):
+        # bootc switch to the ref the host spec already tracks is a no-op
+        # ("Image specification is unchanged."); the scenario's own
+        # bootc upgrade stages the candidate instead.
+        monkeypatch.setattr(
+            self.mod,
+            "run_ssh",
+            self._fake_run_ssh(
+                [
+                    _bootc_status("sha256:cand", rollback="sha256:base"),
+                    _bootc_status("sha256:base", rollback="sha256:cand"),
+                ]
+            ),
+        )
+        monkeypatch.setattr(self.mod, "reboot_and_wait", MagicMock())
+        context = self._context({"digest": "sha256:base"})
+
+        self.mod.restore_pre_upgrade_baseline(context)
+
+        assert self.commands[-1] == "sudo bootc status --format=json"
+        assert not any("bootc switch" in c for c in self.commands)
+
+    def test_fails_when_baseline_is_unreachable(self, monkeypatch):
+        monkeypatch.setattr(
+            self.mod,
+            "run_ssh",
+            self._fake_run_ssh([_bootc_status("sha256:cand", rollback="sha256:other")]),
+        )
+        monkeypatch.setattr(self.mod, "reboot_and_wait", MagicMock())
+        context = self._context({"digest": "sha256:base"})
+
+        with pytest.raises(AssertionError, match="Cannot restore pre-upgrade baseline"):
+            self.mod.restore_pre_upgrade_baseline(context)
+
+    def test_fails_when_rollback_does_not_land_on_baseline(self, monkeypatch):
+        monkeypatch.setattr(
+            self.mod,
+            "run_ssh",
+            self._fake_run_ssh(
+                [
+                    _bootc_status("sha256:cand", rollback="sha256:base"),
+                    _bootc_status("sha256:cand", rollback="sha256:base"),
+                ]
+            ),
+        )
+        monkeypatch.setattr(self.mod, "reboot_and_wait", MagicMock())
+        context = self._context({"digest": "sha256:base"})
+
+        with pytest.raises(AssertionError, match="Rollback did not restore baseline"):
+            self.mod.restore_pre_upgrade_baseline(context)
+
+
+class TestIsDeploymentSettled:
+    def setup_method(self):
+        self.mod = _import_lifecycle_steps()
+
+    def test_settled_with_booted_and_no_staged(self):
+        raw = '{"status": {"booted": {"image": {"imageDigest": "sha256:abc"}}, "staged": null}}'
+        settled, reason = self.mod._is_deployment_settled(raw)
+        assert settled is True
+        assert "deployment is settled" in reason
+
+    def test_settled_with_booted_and_staged_omitted(self):
+        raw = '{"status": {"booted": {"image": {"imageDigest": "sha256:abc"}}}}'
+        settled, reason = self.mod._is_deployment_settled(raw)
+        assert settled is True
+        assert "deployment is settled" in reason
+
+    def test_not_settled_when_staged_present(self):
+        raw = '{"status": {"booted": {"image": {}}, "staged": {"image": {}}}}'
+        settled, reason = self.mod._is_deployment_settled(raw)
+        assert settled is False
+        assert "staged deployment is present" in reason
+
+    def test_not_settled_when_booted_missing(self):
+        raw = '{"status": {"staged": null}}'
+        settled, reason = self.mod._is_deployment_settled(raw)
+        assert settled is False
+        assert "missing or empty 'booted'" in reason
+
+    def test_not_settled_when_booted_empty_dict(self):
+        raw = '{"status": {"booted": {}}}'
+        settled, reason = self.mod._is_deployment_settled(raw)
+        assert settled is False
+        assert "missing or empty 'booted'" in reason
+
+    def test_not_settled_when_status_missing(self):
+        raw = '{"booted": {"image": {}}}'
+        settled, reason = self.mod._is_deployment_settled(raw)
+        assert settled is False
+        assert "missing 'status' dict" in reason
+
+    def test_not_settled_when_status_not_a_dict(self):
+        raw = '{"status": "ready"}'
+        settled, reason = self.mod._is_deployment_settled(raw)
+        assert settled is False
+        assert "missing 'status' dict" in reason
+
+    def test_not_settled_when_top_level_not_a_dict(self):
+        raw = '["status"]'
+        settled, reason = self.mod._is_deployment_settled(raw)
+        assert settled is False
+        assert "top-level JSON is list" in reason
+
+    def test_not_settled_when_invalid_json(self):
+        settled, reason = self.mod._is_deployment_settled("not-json")
+        assert settled is False
+        assert "invalid bootc status JSON" in reason
+
+    def test_not_settled_when_empty_or_whitespace(self):
+        settled, reason = self.mod._is_deployment_settled("")
+        assert settled is False
+        assert "output was empty" in reason
+
+        settled, reason = self.mod._is_deployment_settled("   \n\t")
+        assert settled is False
+        assert "output was empty" in reason
+
+
+class TestDeploymentIsSettled:
+    def setup_method(self):
+        self.mod = _import_lifecycle_steps()
+
+    def test_settles_immediately_when_valid(self, monkeypatch):
+        context = MagicMock()
+        valid_json = '{"status": {"booted": {"image": "ref"}, "staged": null}}'
+        self.mod.run_ssh.return_value = (valid_json, 0)
+        sleep_mock = MagicMock()
+        monkeypatch.setattr(self.mod, "sleep", sleep_mock)
+
+        self.mod.deployment_is_settled(context, timeout=60)
+
+        self.mod.run_ssh.assert_called_once_with(
+            context, "sudo bootc status --format=json", timeout=15
+        )
+        sleep_mock.assert_not_called()
+
+    def test_retries_and_succeeds_after_transient_states(self, monkeypatch):
+        context = MagicMock()
+        staged_json = '{"status": {"booted": {"image": "ref"}, "staged": {"image": "new"}}}'
+        settled_json = '{"status": {"booted": {"image": "ref"}, "staged": null}}'
+        self.mod.run_ssh.side_effect = [
+            ("error: locked", 1),
+            (staged_json, 0),
+            (settled_json, 0),
+        ]
+        sleep_mock = MagicMock()
+        monkeypatch.setattr(self.mod, "sleep", sleep_mock)
+
+        self.mod.deployment_is_settled(context, timeout=60)
+
+        assert self.mod.run_ssh.call_count == 3
+        assert sleep_mock.call_count == 2
+
+    def test_raises_assertion_error_on_deadline_expiration(self, monkeypatch):
+        import subprocess
+
+        context = MagicMock()
+        self.mod.run_ssh.side_effect = subprocess.TimeoutExpired(cmd="ssh", timeout=15)
+        sleep_mock = MagicMock()
+        monkeypatch.setattr(self.mod, "sleep", sleep_mock)
+
+        # Mock time progression to trigger deadline expiration
+        times = [100.0, 105.0, 115.0]
+        monkeypatch.setattr(self.mod, "time", lambda: times.pop(0) if times else 200.0)
+
+        with pytest.raises(AssertionError, match="Deployment did not settle within 10s"):
+            self.mod.deployment_is_settled(context, timeout=10)
+
+    def test_deployment_is_settled_with_timeout(self, monkeypatch):
+        context = MagicMock()
+        valid_json = '{"status": {"booted": {"image": "ref"}}}'
+        self.mod.run_ssh.return_value = (valid_json, 0)
+        monkeypatch.setattr(self.mod, "sleep", MagicMock())
+
+        self.mod.deployment_is_settled_with_timeout(context, timeout=45)
+
+        self.mod.run_ssh.assert_called_once_with(
+            context, "sudo bootc status --format=json", timeout=15
+        )
+
+
+
+class TestDigestVerification:
+    """Missing evidence and same-image reboots must fail rather than skip."""
+
+    original = "sha256:" + "a" * 64
+    candidate = "sha256:" + "b" * 64
+
+    def setup_method(self):
+        self.mod = _import_lifecycle_steps()
+
+    def context(self, booted=None, staged=None, original=None, expected=None):
+        return types.SimpleNamespace(
+            command_stdout=_bootc_status(booted, staged=staged),
+            original_digest=original,
+            expected_upgrade_digest=expected,
+            scenario=MagicMock(),
+        )
+
+    def status_command(self, context, rc=0):
+        self.mod.run_ssh.side_effect = lambda *a, **kw: (context.command_stdout, rc)
+
+    @pytest.mark.parametrize("digest", [None, "", "sha256:abcd", "not-a-digest"])
+    def test_original_capture_rejects_missing_or_invalid_digest(self, digest):
+        context = self.context(booted=digest)
+        self.status_command(context)
+        with pytest.raises(AssertionError, match="booted imageDigest"):
+            self.mod.capture_original_digest(context)
+        assert context.original_digest is None
+
+    def test_original_capture_checks_command_return_code(self):
+        context = self.context(booted=self.original)
+        self.status_command(context, rc=1)
+        with pytest.raises(AssertionError, match="exited 1"):
+            self.mod.capture_original_digest(context)
+        assert context.original_digest is None
+
+    def test_distinct_candidate_is_captured_and_verified_after_reboot(self):
+        context = self.context(booted=self.original)
+        self.status_command(context)
+        self.mod.capture_original_digest(context)
+        context.command_stdout = _bootc_status(self.original, staged=self.candidate)
+        self.mod.capture_staged_digest(context)
+        assert context.expected_upgrade_digest == self.candidate
+        context.command_stdout = _bootc_status(self.candidate)
+        self.mod.active_matches_target(context)
+        context.command_stdout = _bootc_status(self.original)
+        self.mod.active_matches_original(context)
+        context.scenario.skip.assert_not_called()
+
+    @pytest.mark.parametrize("staged", [None, "", "sha256:abcd", original])
+    def test_candidate_capture_rejects_absent_invalid_or_unchanged_digest(self, staged):
+        context = self.context(booted=self.original, staged=staged, original=self.original)
+        self.status_command(context)
+        with pytest.raises(AssertionError):
+            self.mod.capture_staged_digest(context)
+        assert context.expected_upgrade_digest is None
+
+    def test_candidate_capture_requires_original_evidence(self):
+        context = self.context(booted=self.original, staged=self.candidate)
+        self.status_command(context)
+        with pytest.raises(AssertionError, match="original_digest is not set"):
+            self.mod.capture_staged_digest(context)
+
+    def test_candidate_capture_checks_command_return_code(self):
+        context = self.context(booted=self.original, staged=self.candidate, original=self.original)
+        self.status_command(context, rc=1)
+        with pytest.raises(AssertionError, match="exited 1"):
+            self.mod.capture_staged_digest(context)
+        assert context.expected_upgrade_digest is None
+
+    @pytest.mark.parametrize("check", ["active_matches_target", "active_matches_original"])
+    def test_verification_fails_without_expected_evidence(self, check):
+        context = self.context(booted=self.original)
+        with pytest.raises(AssertionError, match="is not set"):
+            getattr(self.mod, check)(context)
+        context.scenario.skip.assert_not_called()
+
+    @pytest.mark.parametrize("check", ["active_matches_target", "active_matches_original"])
+    def test_verification_rejects_wrong_running_digest(self, check):
+        context = self.context(
+            booted=self.candidate, original=self.original, expected=self.original,
+        )
+        with pytest.raises(AssertionError, match="Active digest"):
+            getattr(self.mod, check)(context)
+        context.scenario.skip.assert_not_called()

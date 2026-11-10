@@ -5,13 +5,15 @@
 # suite via qecore-headless.
 #
 # Scope: GUI suites that run inside the VM via qecore-headless (AT-SPI).
-#   Supported: smoke, developer, dx, software, vanilla-gnome
+#   Supported: smoke, developer, dx, software, vanilla-gnome, extensions, gnomeos-canary
 #   NOT supported: lifecycle, security, hardware (need plain-SSH mode — future work)
 #
 # Requirements:
 #   - Runner must have KVM enabled (ubuntu-latest on GHA has it)
 #   - OCI image must be a bootc/ostree image (uses bootc install to-disk)
 #   - gnome-ponytail-daemon must be baked into the OCI image
+#     (suite: extensions checks this and other prerequisites before boot via
+#     scripts/guest_preflight.py and records results/guest-provenance.json)
 #
 # Usage:
 #   - uses: projectbluefin/testsuite/.github/actions/gnome-e2e@main
@@ -20,20 +22,23 @@
 #       suite: smoke
 #
 # The action writes results to ./results/ and vm-serial.log in the workspace.
+# For most suites the caller decides pass/fail from the behave-rc output; for
+# suite: extensions the action itself fails the job via the mandatory
+# extension-validation gate (scripts/extension_validation.py).
 # Artifact upload is deliberately left to the caller workflow.
 
 name: 'GNOME E2E Tests'
 description: >
   Run a projectbluefin/testsuite behave suite inside a KVM QEMU VM booting
   a bootc/ostree GNOME image. Supports GUI suites (smoke, developer, dx,
-  software, vanilla-gnome).
+  software, vanilla-gnome, extensions, gnomeos-canary).
 
 inputs:
   image:
     description: 'OCI image to test (e.g. ghcr.io/projectbluefin/dakota:latest)'
     required: true
   suite:
-    description: 'Test suite: smoke | developer | dx | software | vanilla-gnome'
+    description: 'Test suite: smoke | developer | dx | software | vanilla-gnome | extensions | gnomeos-canary'
     default: 'smoke'
   testsuite-ref:
     description: >
@@ -48,12 +53,17 @@ inputs:
     description: 'VM CPU count'
     default: '4'
   free-disk-space:
-    description: 'Run ublue-os/remove-unwanted-software to free ~10 GB before provisioning'
+    description: 'Run projectbluefin/actions bootc-build/setup-runner to free disk space before provisioning'
     default: 'true'
 
 outputs:
   behave-rc:
-    description: 'Exit code from behave (0 = all passed)'
+    description: >
+      Exit code from behave (0 = all passed). Informational: the action
+      already fails the job for every suite when behave exits non-zero or no
+      scenario passed (extension-validation gate for extensions and
+      gnomeos-canary, mandatory-coverage gate via scripts/assert_passed.py
+      for all other suites).
     value: ${{ steps.run.outputs.behave_rc }}
   results-path:
     description: 'Workspace-relative path to the results directory'
@@ -64,29 +74,25 @@ runs:
   steps:
 
     # ── Checkout test content ─────────────────────────────────────────────────
-    # Always check out from projectbluefin/testsuite at the same ref as the
-    # action itself so test content matches the action version.
+    # Match the action repository/ref, including local calls on fork branches.
     - name: Checkout testsuite
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
-        repository: projectbluefin/testsuite
+        repository: ${{ github.action_repository || github.repository }}
         ref: ${{ inputs.testsuite-ref || github.action_ref }}
         path: _testsuite
         sparse-checkout: |
           tests/${{ inputs.suite }}
           tests/shared
+          scripts
         sparse-checkout-cone-mode: true
 
     # ── Free disk space ───────────────────────────────────────────────────────
-    # ubuntu-latest ships with ~25 GB free; bootc BIB + QEMU disk needs ~12 GB.
     - name: Free disk space
       if: inputs.free-disk-space == 'true'
-      uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
+      uses: projectbluefin/actions/bootc-build/setup-runner@6453818f6279a2f2c1282919aad0009a88c01819 # v1
       with:
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
+        update-podman: "false"
 
     # ── KVM access ───────────────────────────────────────────────────────────
     - name: Enable KVM access
@@ -103,7 +109,13 @@ runs:
       env:
         GNOME_E2E_IMAGE: ${{ inputs.image }}
       run: |
-        sudo podman pull "${GNOME_E2E_IMAGE}" &
+        (
+          if [[ "${GNOME_E2E_IMAGE}" == localhost/* ]] && sudo podman image exists "${GNOME_E2E_IMAGE}"; then
+            echo "Using locally built image ${GNOME_E2E_IMAGE}"
+          else
+            sudo podman pull "${GNOME_E2E_IMAGE}"
+          fi
+        ) &
         PULL_PID=$!
         sudo apt-get update -q
         sudo apt-get install -y --no-install-recommends qemu-system-x86
@@ -125,6 +137,7 @@ runs:
       shell: bash
       env:
         GNOME_E2E_IMAGE: ${{ inputs.image }}
+        GNOME_E2E_SUITE: ${{ inputs.suite }}
       run: |
         fallocate -l 30G disk.raw
 
@@ -179,6 +192,20 @@ runs:
         echo "GNOME_E2E_ROOT_UUID=${ROOT_UUID}" >> "$GITHUB_ENV"
         echo "GNOME_E2E_KVER=${KVER}" >> "$GITHUB_ENV"
 
+        # Extension-validation lane (#908): record which guest is under test and
+        # fail closed before boot when the image lacks a lane prerequisite
+        # (stock GNOME OS ships no gnome-ponytail-daemon). Cleanup below still
+        # runs; the step fails after it.
+        PREFLIGHT_RC=0
+        if [[ "${GNOME_E2E_SUITE}" == "extensions" || "${GNOME_E2E_SUITE}" == "gnomeos-canary" ]]; then
+          IMAGE_DIGEST=$(sudo podman image inspect --format '{{.Digest}}' "${GNOME_E2E_IMAGE}" 2>/dev/null || true)
+          mkdir -p results
+          sudo python3 _testsuite/scripts/guest_preflight.py "${D}" \
+            --image-ref "${GNOME_E2E_IMAGE}" --image-digest "${IMAGE_DIGEST}" \
+            --output results/guest-provenance.json || PREFLIGHT_RC=$?
+          sudo chown -R "$(id -u):$(id -g)" results
+        fi
+
         EFI_PART="${LOOP}p2"
         sudo mkdir -p /mnt/efi
         sudo mount "${EFI_PART}" /mnt/efi
@@ -198,6 +225,10 @@ runs:
         sudo chown runner:runner ./vmlinuz ./initramfs.img
 
         sudo mkdir -p "${D}/etc/systemd/system/multi-user.target.wants/"
+        # CI VMs are not users: opt out of the daily countme ping
+        # (projectbluefin-countme.service honours this marker).
+        sudo mkdir -p "${D}/etc/projectbluefin/countme"
+        sudo touch "${D}/etc/projectbluefin/countme/disabled"
         sudo ln -sf /usr/lib/systemd/system/sshd.service \
           "${D}/etc/systemd/system/multi-user.target.wants/sshd.service"
         sudo ssh-keygen -A -f "${D}" 2>/dev/null || true
@@ -221,8 +252,8 @@ runs:
           sudo tee "${D}/etc/ssh/sshd_config.d/99-bluefin-test.conf"
 
         echo 'bluefin-test ALL=(ALL) NOPASSWD:ALL' | \
-          sudo tee "${D}/etc/sudoers.d/bluefin-test"
-        sudo chmod 440 "${D}/etc/sudoers.d/bluefin-test"
+          sudo tee "${D}/etc/sudoers.d/zz-bluefin-test"
+        sudo chmod 440 "${D}/etc/sudoers.d/zz-bluefin-test"
 
         sudo mkdir -p "${D}/etc/gdm"
         printf '[daemon]\nAutomaticLoginEnable=True\nAutomaticLogin=bluefin-test\n' | \
@@ -237,6 +268,10 @@ runs:
         sudo podman rmi "${GNOME_E2E_IMAGE}" 2>/dev/null || true
         ls -lh disk.raw vmlinuz initramfs.img
         df -h .
+        if [[ ${PREFLIGHT_RC} -ne 0 ]]; then
+          echo "::error::Guest preflight failed (rc=${PREFLIGHT_RC}); see results/guest-provenance.json"
+          exit 1
+        fi
 
     # ── Boot VM ───────────────────────────────────────────────────────────────
     - name: Boot VM with QEMU + KVM
@@ -312,13 +347,26 @@ runs:
     # qecore-headless manages the ponytail daemon lifecycle — do not pre-start it.
     - name: Install Python test stack
       shell: bash
+      env:
+        GNOME_E2E_SUITE: ${{ inputs.suite }}
       run: |
         SSH_OPTS="-i /tmp/gnome_e2e_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ControlMaster=auto -o ControlPersist=600 -o ControlPath=/tmp/gnome-e2e-ssh-%C -o ConnectTimeout=3"
         SSH="ssh ${SSH_OPTS} -p 2222 bluefin-test@127.0.0.1"
 
-        $SSH "python3 -m ensurepip --user 2>/dev/null || true"
-        $SSH "python3 -m pip install -q --user qecore behave dogtail python-uinput"
-        $SSH "for f in \$HOME/.local/bin/qecore_*; do sudo ln -sf \"\$f\" /usr/local/bin/\$(basename \"\$f\") 2>/dev/null; done"
+        if [[ "${GNOME_E2E_SUITE}" == "gnomeos-canary" ]]; then
+          $SSH "test -x /opt/gnomeos-harness/bin/qecore-headless"
+          # Native GNOME OS overlay already built its C extensions against the
+          # matching devel image. Do not pip-build them again on the runtime OS.
+          $SSH 'mkdir -p "$HOME/.local/bin"; for f in /opt/gnomeos-harness/bin/*; do ln -sf "$f" "$HOME/.local/bin/$(basename "$f")"; done'
+        else
+          $SSH "python3 -m ensurepip --user 2>/dev/null || true"
+          # Pin to the same qecore the runner image (container/Containerfile.runner)
+          # ships — smoke/environment.py monkeypatches qecore.utility internals
+          # (_get_uinput_device, >= 4.19), so runner/VM drift kills keyboard input
+          # silently (testsuite#820-class failure).
+          $SSH "python3 -m pip install -q --user qecore==4.19.3 behave==1.3.3 dogtail==2.0.3 python-uinput==1.0.1"
+          $SSH "for f in \$HOME/.local/bin/qecore_*; do sudo ln -sf \"\$f\" /usr/local/bin/\$(basename \"\$f\") 2>/dev/null; done"
+        fi
         $SSH "sudo modprobe uinput 2>/dev/null || true"
         $SSH "sudo chmod 0666 /dev/uinput 2>/dev/null || true"
 
@@ -369,6 +417,10 @@ runs:
         [[ -d "_testsuite/tests/shared" ]] && \
           $SCP "_testsuite/tests/shared" "bluefin-test@127.0.0.1:/tmp/gnome_e2e/tests/" || true
 
+        HEADLESS_FLAGS=""
+        if [[ "${GNOME_E2E_SUITE}" == "gnomeos-canary" ]]; then
+          HEADLESS_FLAGS="--dont-kill"
+        fi
         BEHAVE_RC=0
         $SSH "
           set -e
@@ -376,13 +428,20 @@ runs:
           export PATH=\$HOME/.local/bin:\$PATH
           export PYTHONPATH=/tmp/gnome_e2e
           BEHAVE_BIN=\$(which behave)
-          \$HOME/.local/bin/qecore-headless \"\$BEHAVE_BIN /tmp/gnome_e2e/tests/${GNOME_E2E_SUITE}/features/ --format json.pretty --outfile /tmp/gnome_e2e/results/results.json --format pretty --outfile /tmp/gnome_e2e/results/results.txt --format progress --no-capture\"
+          \$HOME/.local/bin/qecore-headless ${HEADLESS_FLAGS} \"\$BEHAVE_BIN /tmp/gnome_e2e/tests/${GNOME_E2E_SUITE}/features/ --format json.pretty --outfile /tmp/gnome_e2e/results/results.json --format pretty --outfile /tmp/gnome_e2e/results/results.txt --format progress --no-capture\"
         " || BEHAVE_RC=$?
 
         $SCP "bluefin-test@127.0.0.1:/tmp/gnome_e2e/results/." ./results/ 2>/dev/null || true
         echo "behave_rc=${BEHAVE_RC}" >> "$GITHUB_OUTPUT"
 
     # ── Summarise results to CI log + job summary ─────────────────────────────
+    # Scenario counting and the pass/fail headline come from
+    # scripts/e2e_summary.py — the copy covered by
+    # tests/unit/test_e2e_summary.py — imported from the _testsuite checkout
+    # above (its sparse checkout includes scripts/). Restating the logic here
+    # is what let an all-undefined/all-untested run render a green headline
+    # (#797), so this step must keep consuming the tested implementation.
+    # Only the SLA block below is genuinely action-specific.
     - name: Summarise results
       if: always()
       shell: bash
@@ -390,6 +449,7 @@ runs:
         GNOME_E2E_SUITE: ${{ inputs.suite }}
       run: |
         python3 - <<'PYEOF'
+        import importlib.util
         import json, os, sys
         from pathlib import Path
 
@@ -401,31 +461,77 @@ runs:
             print("No results.json found — summary unavailable", flush=True)
             sys.exit(0)
 
-        data = json.loads(results_file.read_text())
+        # Single source of truth for what "passed" means: the unit-tested
+        # scripts/e2e_summary.py, checked out into _testsuite by this action.
+        # Load it by file path instead of `import scripts.e2e_summary`: this
+        # action runs in arbitrary consumer workspaces, and a regular
+        # `scripts/` package there (one with __init__.py) wins over the
+        # checkout's namespace package regardless of sys.path order.
+        module_path = Path("_testsuite/scripts/e2e_summary.py").resolve()
+        try:
+            spec = importlib.util.spec_from_file_location("e2e_summary", module_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"no loader for {module_path}")
+            e2e_summary = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(e2e_summary)
+            count_scenarios = e2e_summary.count_scenarios
+            is_success      = e2e_summary.is_success
+            summary_icon    = e2e_summary.summary_icon
+            load_report     = e2e_summary.load_report
+            error_text      = e2e_summary.error_text
+        except Exception as exc:
+            # Fail closed rather than render a headline we cannot justify, and
+            # catch broadly on purpose: exec_module runs the module's top level,
+            # so a corrupted or incompatible e2e_summary.py can raise anything
+            # (SyntaxError included). This step is reporting-only and runs with
+            # `if: always()`; letting an exception escape would exit non-zero and
+            # fail the consumer's job over a summary we simply could not render.
+            print(
+                f"ERROR: cannot import scripts.e2e_summary: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            summary_file = os.environ.get("GITHUB_STEP_SUMMARY", "")
+            if summary_file:
+                with open(summary_file, "a") as fh:
+                    fh.write(
+                        f"## ⚠️ E2E Results — `{suite}`\n\n"
+                        "Summary unavailable: `scripts/e2e_summary.py` could not "
+                        "be loaded from the testsuite checkout.\n"
+                    )
+            sys.exit(0)
 
-        passed = failed = skipped = 0
+        # load_report tolerates a results.json left truncated by a mid-run
+        # crash (behave writes the closing ']' only in close()): it salvages
+        # the complete feature objects instead of raising and failing the job.
+        # `complete` is False for a salvaged file, and such a run is never
+        # PASSED: the feature that was running when the lane died is the one
+        # the salvage drops.
+        data, complete = load_report(results_file.read_text())
+
+        counts = count_scenarios(data)
+        passed = counts["passed"]
+        failed = counts["failed"]
+        skipped = counts["skipped"]
+        total = sum(counts.values())
+
         failures = []
         for feature in data:
             feature_name = feature.get("name", "unknown feature")
             for element in feature.get("elements", []):
-                if element.get("type") == "background":
+                if element.get("type") != "scenario":
                     continue
-                status = element.get("status", "")
-                if status == "passed":
-                    passed += 1
-                elif status == "failed":
-                    failed += 1
-                    scenario_name = element.get("name", "")
-                    failed_step = error_msg = ""
-                    for step in element.get("steps", []):
-                        result = step.get("result", {})
-                        if result.get("status") == "failed":
-                            failed_step = step.get("name", "")
-                            error_msg  = result.get("error_message", "")
-                            break
-                    failures.append((feature_name, scenario_name, failed_step, error_msg))
-                elif status == "skipped":
-                    skipped += 1
+                if element.get("status") != "failed":
+                    continue
+                scenario_name = element.get("name", "")
+                failed_step = error_msg = ""
+                for step in element.get("steps", []):
+                    result = step.get("result", {})
+                    if result.get("status") == "failed":
+                        failed_step = step.get("name", "")
+                        error_msg  = error_text(result.get("error_message"))
+                        break
+                failures.append((feature_name, scenario_name, failed_step, error_msg))
 
         sla_violations = []
         if timings_file.exists():
@@ -438,11 +544,30 @@ runs:
                     pass
 
         # ── Compact summary in CI log ──────────────────────────────────────
-        total       = passed + failed + skipped
-        status_word = "PASSED" if failed == 0 else "FAILED"
+        # PASSED only when is_success holds on a complete results.json: an
+        # undefined-only, untested-only, errored, empty or truncated run is
+        # INCOMPLETE, never PASSED (failed == 0 is not enough).
+        if failed:
+            status_word = "FAILED"
+        elif complete and is_success(counts):
+            status_word = "PASSED"
+        else:
+            status_word = "INCOMPLETE"
         sep = "=" * 64
         print(f"\n{sep}", flush=True)
-        print(f"E2E {status_word}: {passed} passed / {failed} failed / {skipped} skipped (total {total})", flush=True)
+        print(
+            f"E2E {status_word}: {passed} passed / {failed} failed / "
+            f"{skipped} skipped / {counts['undefined']} undefined / "
+            f"{counts['untested']} untested / {counts['other']} error-other "
+            f"(total {total})",
+            flush=True,
+        )
+        if not complete:
+            print(
+                "WARNING: results.json was truncated (the lane crashed mid-run); "
+                "counts cover only the features that finished.",
+                flush=True,
+            )
 
         if failures:
             print("\nFailed scenarios:", flush=True)
@@ -466,12 +591,24 @@ runs:
         if not summary_file:
             sys.exit(0)
 
-        icon  = "✅" if failed == 0 else "❌"
+        # ✅ only on a clean run, ❌ on any failure, ⚠️ for undefined/untested/
+        # errored scenarios — the same rule as the CI-log headline above.
+        icon  = summary_icon(counts)
+        if not complete and icon == "✅":
+            icon = "⚠️"
         lines = [f"## {icon} E2E Results — `{suite}`", ""]
+        if not complete:
+            lines += [
+                "**⚠️ INCOMPLETE (results truncated):** `results.json` was cut "
+                "off by a mid-run crash; counts cover only the features that "
+                "finished.",
+                "",
+            ]
         lines += [
-            "| ✅ Passed | ❌ Failed | ⏭️ Skipped | Total |",
-            "|----------|----------|-----------|-------|",
-            f"| {passed} | **{failed}** | {skipped} | {total} |",
+            "| ✅ Passed | ❌ Failed | ⏭️ Skipped | ⚠️ Undefined | ⚪ Untested | 🛑 Error/other | Total |",
+            "|----------|----------|-----------|-------------|-----------|---------------|-------|",
+            f"| {passed} | **{failed}** | {skipped} | {counts['undefined']} | "
+            f"{counts['untested']} | {counts['other']} | {total} |",
             "",
         ]
 
@@ -496,3 +633,58 @@ runs:
         with open(summary_file, "a") as fh:
             fh.write("\n".join(lines) + "\n")
         PYEOF
+
+    # ── Extension-validation gate (mandatory service gate) ────────────────────
+    # Issue #908 acceptance: an extension-validation run passes only when at
+    # least one scenario genuinely passed and nothing errored. The summarise
+    # step above renders scripts/e2e_summary.py, which deliberately scores an
+    # empty or all-skipped run green (whole suites legitimately ship only
+    # @future) — the wrong verdict for this lane, where all-skipped means the
+    # extensions never loaded. scripts/extension_validation.py (added in #916)
+    # fails closed for empty / all-skipped / undefined / untested / hook-error
+    # / failed-boot / missing-result runs; this step makes it the lane verdict.
+    # Runs even when behave failed (if: always()) so a crashed lane that left
+    # no results.json still fails the gate instead of slipping through on the
+    # run step's exit code alone. The GNOME OS baseline also uses this strict
+    # gate; every other suite keeps the e2e_summary headline.
+    - name: Gate extension-validation run
+      if: always() && (inputs.suite == 'extensions' || inputs.suite == 'gnomeos-canary')
+      shell: bash
+      env:
+        GNOME_E2E_BEHAVE_RC: ${{ steps.run.outputs.behave_rc }}
+      run: |
+        GATE="_testsuite/scripts/extension_validation.py"
+        if [[ ! -f "${GATE}" ]]; then
+          echo "::error::Extension-validation gate script missing: ${GATE} not in the testsuite checkout (needs PR #916). Failing closed."
+          exit 1
+        fi
+        python3 "${GATE}" results/results.json
+        # A wrapper/after_all failure can leave passing scenario records. Both
+        # the complete result gate and the actual process must succeed.
+        if [[ "${GNOME_E2E_BEHAVE_RC}" != "0" ]]; then
+          echo "::error::qecore/Behave did not exit successfully (${GNOME_E2E_BEHAVE_RC:-missing exit code})"
+          exit 1
+        fi
+
+    # ── Mandatory-coverage gate (every other suite) ───────────────────────────
+    # The run step records behave's exit code without failing, and the
+    # summarise step only renders a headline, so without this gate a lane that
+    # executed nothing (missing/empty/truncated results.json, setup failure,
+    # zero passing scenarios) finished green. scripts/assert_passed.py is the
+    # same verdict contract e2e.yml uses for its desktop suites.
+    - name: Gate suite has passing scenarios
+      if: always() && inputs.suite != 'extensions' && inputs.suite != 'gnomeos-canary'
+      shell: bash
+      env:
+        GNOME_E2E_BEHAVE_RC: ${{ steps.run.outputs.behave_rc }}
+      run: |
+        GATE="_testsuite/scripts/assert_passed.py"
+        if [[ ! -f "${GATE}" ]]; then
+          echo "::error::Mandatory-coverage gate script missing: ${GATE} not in the testsuite checkout. Failing closed."
+          exit 1
+        fi
+        python3 "${GATE}" results/results.json
+        if [[ "${GNOME_E2E_BEHAVE_RC}" != "0" ]]; then
+          echo "::error::qecore/Behave did not exit successfully (${GNOME_E2E_BEHAVE_RC:-missing exit code})"
+          exit 1
+        fi

@@ -24,6 +24,64 @@ COUNTED_STATUSES = (*SCENARIO_STATUSES, OTHER_STATUS)
 SUCCESS_STATUSES = ("passed", "skipped")
 
 
+def load_report(text: str) -> tuple[list[dict[str, Any]], bool]:
+    """Parse a behave ``results.json`` string, tolerating a crashed file.
+
+    behave's JSON formatter opens the outfile with ``"w"`` and writes the
+    closing ``]`` only in its ``close()`` hook; a mid-run crash (before
+    ``close``) therefore leaves N complete top-level feature objects with no
+    footer and possibly a truncated final object. ``json.loads`` raises
+    ``json.JSONDecodeError`` on such input, which would otherwise abort the
+    summarise step -- and on the lab pipeline fail the job for the wrong
+    reason. This loader returns the parsed array in the normal case, and on a
+    decode error salvages every complete top-level feature object so a crashed
+    run still yields a partial report instead of nothing.
+
+    Returns ``(report, complete)``. ``complete`` is ``False`` whenever the
+    document was not a whole JSON array (salvaged, empty, or some other JSON
+    value), so callers must render the run as INCOMPLETE rather than trust the
+    counts of a partial report: the feature that was running when the lane
+    died is exactly the one the salvage drops.
+    """
+    try:
+        report = json.loads(text)
+    except json.JSONDecodeError:
+        return _salvage_partial(text), False
+    if not isinstance(report, list):
+        return [], False
+    return report, True
+
+
+def _salvage_partial(text: str) -> list[dict[str, Any]]:
+    """Recover complete top-level feature objects from a truncated file.
+
+    Skips the opening ``[`` and any ```` , ```` separators, then decodes one
+    feature object at a time with :meth:`json.JSONDecoder.raw_decode`; the
+    first object that does not parse (a truncated tail) stops the salvage, so
+    only whole features are returned.
+    """
+    decoder = json.JSONDecoder()
+    pos = 0
+    length = len(text)
+    report: list[dict[str, Any]] = []
+    while pos < length:
+        while pos < length and text[pos].isspace():
+            pos += 1
+        if pos >= length:
+            break
+        char = text[pos]
+        if char == "[" or char == ",":
+            pos += 1
+            continue
+        try:
+            obj, end = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            break
+        report.append(obj)
+        pos = end
+    return report
+
+
 def count_scenarios(report: list[dict[str, Any]]) -> dict[str, int]:
     """Count scenario statuses, excluding backgrounds.
 
@@ -44,13 +102,47 @@ def count_scenarios(report: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def scenario_statuses(report: list[dict[str, Any]]) -> dict[str, str]:
+    """Map scenario name to status, excluding backgrounds.
+
+    Consumers that need per-scenario statuses (``just compare-results``)
+    call this instead of keeping a private results.json walker, so the
+    ``type == "scenario"`` filter stays a property of this module rather
+    than something every reader re-derives.
+    """
+    statuses: dict[str, str] = {}
+    for feature in report:
+        for element in feature.get("elements") or []:
+            if element.get("type") != "scenario":
+                continue
+            name = element.get("name")
+            if name:
+                statuses[name] = element.get("status", "unknown")
+    return statuses
+
+
+def error_text(error_message: Any) -> str:
+    """Return a step's ``result.error_message`` as one string.
+
+    behave's JSON formatter writes a multi-line message as a list of lines
+    (``split_text_into_lines``), and a one-line message as a plain string.
+    Tracebacks are multi-line, so most real failures arrive as a list.
+    """
+    if not error_message:
+        return ""
+    if isinstance(error_message, list):
+        return "\n".join(str(line) for line in error_message)
+    return str(error_message)
+
+
 def is_success(counts: dict[str, int]) -> bool:
     """Return True only when every counted scenario passed or was skipped.
 
     ``failed == 0`` is not enough: an undefined-only, untested-only or
-    errored run must never render a green headline.
+    errored run must never render a green headline, and neither may a run
+    that counted no scenarios at all, since it proved nothing.
     """
-    return all(
+    return sum(counts.values()) > 0 and all(
         count == 0
         for status, count in counts.items()
         if status not in SUCCESS_STATUSES
@@ -68,8 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results_json", type=Path)
     args = parser.parse_args(argv)
-    with args.results_json.open(encoding="utf-8") as file_obj:
-        report = json.load(file_obj)
+    report, _complete = load_report(args.results_json.read_text(encoding="utf-8"))
     print(json.dumps(count_scenarios(report)))
     return 0
 

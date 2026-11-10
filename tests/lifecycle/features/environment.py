@@ -29,6 +29,10 @@ def before_all(context):
     context.initial_version_id = None
     context.current_version_id = None
     context.migration_source_ref = None
+    # Run-scoped (set at the root layer so it survives across scenarios):
+    # the pre-upgrade VM state that "VM is restored to the pre-upgrade
+    # baseline deployment" returns to before each gated upgrade scenario.
+    context.lifecycle_baseline = {}
     # Central toggle: set ZSTD_CHUNKED=false to skip @zstd_chunked scenarios
     # when the target image does not yet ship with zstd:chunked compression.
     # Flip to true once projectbluefin/bluefin ships zstd:chunked layers.
@@ -63,3 +67,46 @@ def before_scenario(context, scenario):
 
 def after_scenario(context, scenario):
     record_end(context, scenario)
+
+
+def _assert_required_lifecycle_passed(features):
+    """Reject missing or skipped evidence, including tag-filtered scenarios.
+
+    Required scenarios are those containing the existing mandatory staging
+    assertion, not optional capability/migration/idempotency probes. Inspect
+    the parsed model rather than after_scenario events: Behave does not call
+    scenario hooks for scenarios excluded by a tag filter. Scenarios parked
+    by a skip tag (@pending, @future, @quarantine, @hardware_blocked) never
+    run, so they are not required.
+    """
+    from tests.shared.quarantine import is_non_runnable
+
+    required = [
+        scenario
+        for feature in features
+        for scenario in feature.walk_scenarios()
+        if not is_non_runnable(scenario)
+        and any(
+            step.name == "bootc upgrade output indicates image was staged"
+            for step in scenario.steps
+        )
+    ]
+    assert required, "Lifecycle qualification has no required upgrade scenarios"
+    incomplete = [
+        scenario.name for scenario in required
+        if scenario.status.name != "passed"
+        or any(step.status.name != "passed" for step in scenario.steps)
+    ]
+    assert not incomplete, (
+        "Lifecycle qualification requires every upgrade/rollback assertion to "
+        "pass; skipped or incomplete required scenarios: " + "; ".join(incomplete)
+    )
+
+
+def after_all(context):
+    # TARGET_IMAGE is the existing targeted-upgrade input, exported by e2e.yml.
+    # Untargeted exploratory/manual runs retain their capability-skip semantics.
+    if os.environ.get("TARGET_IMAGE", "").strip():
+        # The runner owns the complete parsed model, including filtered features
+        # whose before_feature/after_feature hooks never ran.
+        _assert_required_lifecycle_passed(context._runner.features)

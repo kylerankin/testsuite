@@ -39,7 +39,7 @@ metadata:
 
 1. Read the target `.feature` file and the suite's `steps/*.py` before adding phrases.
 2. Reuse `tests/shared/ssh_steps.py` for generic SSH command/assertion steps instead of duplicating helpers.
-3. Star-importing `tests/shared/ssh_steps` obligates the suite to set the context attributes those steps read. `run_ssh()` dereferences `context.ssh_key`, `context.ssh_user`, `context.vm_ip` and (optionally) `context.ssh_port`; a suite that skips this fails every SSH scenario with `AttributeError` on the first step. Call `tests.shared.ssh_config.populate_ssh_context(context)` from the suite's `before_all` (see `tests/software/features/environment.py`) — it resolves context attributes → behave userdata → `SSH_KEY`/`VM_IP`/`VM_USER`/`SSH_PORT` env vars → runner defaults, which is the same source suite-local SSH helpers (e.g. the software suite's `_flatpak()`) must use. Never let a suite keep a second, env-only SSH path alongside the shared steps.
+3. Star-importing `tests/shared/ssh_steps` obligates the suite to set the context attributes those steps read. `run_ssh()` builds its argv via `ssh_config.ssh_argv(context)`, which prefers `context.ssh_key`, `context.ssh_user`, `context.vm_ip`, `context.ssh_port` and then falls back to userdata/env/defaults; a suite that skips this no longer fails loudly — it silently runs against default credentials. Call `tests.shared.ssh_config.populate_ssh_context(context)` from the suite's `before_all` (see `tests/software/features/environment.py`) — it resolves context attributes → behave userdata → `SSH_KEY`/`VM_IP`/`VM_USER`/`SSH_PORT`/`TMT_SSH_PORT` env vars → runner defaults, which is the same source suite-local SSH helpers (e.g. the software suite's `_flatpak()`) must use. Never let a suite keep a second, env-only SSH path alongside the shared steps.
 4. Keep step phrases unique within the loaded suite and check for collisions before committing.
 5. Choose assertions that match the command shape: equality for single-line output, substring for multiline output.
 6. Run `behave --dry-run` on the touched suite before pushing so undefined or ambiguous phrases fail locally.
@@ -143,8 +143,11 @@ Two recipes are worked out in detail in
 [`references/ujust-noninteractive.md`](references/ujust-noninteractive.md):
 `toggle-updates` gained a non-interactive `ACTION` entry point in
 `projectbluefin/common` and is covered by a `@requires_toggle_action` scenario
-(`projectbluefin/testsuite#499`), while `toggle-devmode` has one via
-`bctl devmode --enable/--disable` (`projectbluefin/testsuite#500`).
+(`projectbluefin/testsuite#499`), while `toggle-devmode` still has none and is
+deliberately uncovered (`projectbluefin/testsuite#500`).
+
+Image-content contracts use the same gate: `@requires_custom_command_list` skips
+the Logo Menu swap scenarios on images predating it (Classic). Never add `@pending`.
 
 ### uupd conditional suppression coverage
 
@@ -163,7 +166,6 @@ NetworkManager state is injected without changing the host's persistent state.
 
 ## MIME type handler verification (smoke suite)
 
-
 Use `xdg-mime query default <mime-type>` to verify handler registration without launching apps. Assert against known `.desktop` file names or an allow-set:
 
 ```python
@@ -175,7 +177,7 @@ assert actual in DOCUMENT_VIEWERS
 
 This validates the MIME database end-to-end (xdg-mime, .desktop file registration, mimeapps.list) without window management flake.
 
-For lightweight smoke-suite CLI assertions (for example `gsettings`, `pgrep`, or `journalctl` checks), prefer qecore's built-in command capture steps in the `.feature` file instead of adding wrappers:
+For lightweight smoke-suite CLI assertions (for example `gsettings`, `pgrep`, or `journalctl` checks), prefer qecore's built-in command capture steps in the `.feature` file instead of adding wrappers. In CI the smoke suite runs inside the GUI runner container, and qecore's `Run and save command output` executes **there**, not in the VM. Anything that must observe the image (a binary on `PATH`, `sudo --version`, a shipped file) must use `Run command on VM:` with `VM command return code is` / `VM command output contains` from `tests/smoke/features/steps/orca_steps.py`. A runner-side check fails with exit `127` or empty output on Dakota, and can pass falsely on an image where the runner happens to ship the same tool:
 
 For MIME-handler coverage, prefer direct `subprocess.run(["xdg-mime", "query", "default", mime])` helpers in `tests/smoke/features/steps/steps.py` and assert the resolved `.desktop` file (or an allowed viewer set) instead of launching the app with `xdg-open`. This keeps smoke checks local to the VM and avoids window-management flake while still validating Bluefin's handler registration end to end.
 
@@ -226,7 +228,7 @@ Two properties make these scenarios survivable in CI, where
    scenario with `Reset flatpak user overrides for ...`.
 2. **A sweep that passes on an empty install set is not coverage.** That is why
    `Every installed flatpak app exposes a parsable permission set` is `@pending` on
-   #706. More traps: [references/flatpak-permissions.md](references/flatpak-permissions.md).
+   #706. More traps, incl. SSH install round-trips: [references/flatpak-permissions.md](references/flatpak-permissions.md).
 
 `flatpak override --show` emits a keyfile, not flag syntax:
 
@@ -240,17 +242,17 @@ Parse it (`parse_flatpak_context` in
 `=` and compare the key — matching bare key names against `filesystems=home;`
 never matches and passes falsely.
 
-## Software suite SSH context
+## Software suite gates (`@flatpak_cli`, `@bazaar_ui`, `@skip_bluefin`)
 
-`tests/software/features/environment.py` calls `populate_ssh_context(context)` in
-`before_all` (#718), so the shared `tests/shared/ssh_steps.py` steps work there.
-
-## `@flatpak_cli` marks image-agnostic software scenarios
-
-`tests/software/features/environment.py` skips any `@software` scenario when Bazaar
-(`io.github.kolunmi.Bazaar`) is absent — unless the scenario also carries
-`@flatpak_cli`. Tag CLI-only, image-agnostic software scenarios with `@flatpak_cli`
-so they still run on gnomeos and other non-Bluefin images.
+`tests/software/features/environment.py` calls `populate_ssh_context` in `before_all`
+(#718) and skips `@software` scenarios when Bazaar is absent unless they carry
+`@flatpak_cli` (image-agnostic, so they run on gnomeos too). The Bazaar probe fails
+closed: an SSH or `flatpak list` error is a HOOK-ERROR, never "absent". Only
+`@bazaar_ui` scenarios get the qecore sandbox hooks and the `flatpak kill` cleanup.
+`@skip_bluefin` is an image-name applicability tag (`$BASE_IMAGE`, `-D image=`, then `$IMAGE`), not a
+live probe. It is on the FlatPark scenarios only, because Bluefin's pinned common
+predates common#1549. Drop it when the pin catches up. Never write `\"` in a step
+argument ([why](references/shared-ssh.md#quoting)).
 
 ## `@requires_cached_image` gates scenarios on a pre-pulled OCI image
 
@@ -262,14 +264,13 @@ after `skip_quarantine`, reads the image refs out of the scenario's own step
 text, probes each with `podman image exists` on the DUT, and skips while any is
 absent. The scenario then activates on its own once the image is cached.
 
-It is a **runtime capability gate** like `@requires_bctl`, not a non-runnable
+It is a **runtime capability gate** like `@requires_brew`, not a non-runnable
 tag: keep it out of `_SKIP_TAGS` / `NON_RUNNABLE_TAGS` / `BEHAVE_TAG_ARGS`, and
 never pair it with `@pending` or `@future` — `skip_quarantine` returns first and
 the gate goes inert. See
 [the cached-image gate reference](references/cached-image-gate.md).
 
 ## Feature scaffolding with @future
-
 
 Use `@future` when the step implementation isn't ready yet:
 
@@ -388,7 +389,6 @@ This keeps common-suite assertions aligned with how Bluefin actually ships those
 
 ## Quarantine Protocol
 
-
 When a scenario fails in QEMU CI due to a known environment limitation (not a code bug), tag it `@quarantine` and file a tracking issue:
 
 ```gherkin
@@ -410,9 +410,12 @@ The CI runs behave with `--tags ~quarantine`, so quarantined scenarios are skipp
 
 ### Known quarantine categories (2026-06)
 
-**smoke-b:** screen lock (#528), PDF/PNG/video MIME defaults (#529)
+**smoke-b:** screen lock (#528)
 - Screen lock: GNOME 50 headless QEMU — lock screen doesn't engage within 10s
-- MIME defaults: Fedora system mimeapps.list sets Firefox as default; Flatpak Papers/Loupe don't override at system level on fresh install
+
+PDF/PNG/video checks are active after #529: `projectbluefin/common` ships
+`/etc/xdg/mimeapps.list` with Papers/Loupe/Showtime defaults. The video allow-set
+already accepts `org.gnome.Showtime.desktop`; keep these regression checks active.
 
 **common-a/b:** 13 scenarios in dconf, flatpak, immutable, polkit (#531)
 - Flatpak: /var/lib/flatpak not preserved from OCI build; flatpak-preinstall.service masked in CI
@@ -489,7 +492,6 @@ non-dependent scenarios to a separate feature.
 - [When to use local subprocess instead of SSH in the smoke suite.](references/smoke-vs-ssh.md)
 - [Avoiding duplicate step phrases and AmbiguousStep errors.](references/ambiguous-steps.md)
 - [Mocking interactive CLI tools (gum, fzf, gh) in ujust coverage.](references/mocking-interactive-cli.md)
-- [Driving bluefinctl devmode non-interactively, and the assertion traps around it.](references/bctl-devmode.md)
 - [Which ujust recipes can be driven non-interactively, and why the rest stay @pending.](references/ujust-noninteractive.md)
 - [Gating scenarios on a pre-pulled OCI image with @requires_cached_image.](references/cached-image-gate.md)
 

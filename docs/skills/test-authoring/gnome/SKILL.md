@@ -1,7 +1,7 @@
 ---
 name: gnome
-version: "1.0"
-last_updated: "2026-07-29"
+version: "1.2"
+last_updated: "2026-10-01"
 id: gnome
 one_line_purpose: Write GNOME Shell, AT-SPI, and dogtail interaction tests.
 entry_point: docs/skills/test-authoring/gnome/SKILL.md
@@ -9,7 +9,7 @@ category: test-authoring
 mcp_compliance_level: partial
 status: active
 dependencies: []
-tags: [gnome, atspi, dogtail]
+tags: [gnome, atspi, dogtail, gnome-51, extensions, overview, helper-fault-injection]
 description: "How to write GNOME Shell / AT-SPI / dogtail tests for the testsuite repo. Load when editing GNOME interaction steps."
 metadata:
   type: pattern
@@ -21,7 +21,6 @@ metadata:
     - /micheleg/dash-to-dock
 ---
 # GNOME Desktop Testing Reference
-
 
 ## When to Use
 
@@ -73,6 +72,29 @@ cmd = "source /tmp/session.env 2>/dev/null; gdbus call --session --dest org.gnom
 _run_host(cmd)
 ```
 
+### Suppressing session idle-lock during smoke runs
+
+Long smoke test runs can exceed the desktop idle timeout, causing the session
+to lock automatically and preventing AT-SPI from querying or interacting with
+application windows (e.g. Settings panels such as Online Accounts).
+
+To prevent auto-locking, `environment.py` (`before_all`) and CI workflows configure
+session idle delay and screensaver settings:
+
+```bash
+gsettings set org.gnome.desktop.session idle-delay 0
+gsettings set org.gnome.desktop.screensaver lock-enabled false
+```
+
+Explicit screen lock/unlock tests (such as `@lock_screen` in `gnome_shell.feature`)
+test manual session locking via `loginctl lock-session` / `loginctl unlock-session`
+and logind `LockedHint`, which remain fully operational even when automatic idle
+lock is disabled.
+
+## GNOME 51 workarounds audit (issue #827)
+
+GNOME 51 (GA 2026-09-16) is Wayland-only and freezes the extension API. Keep every GNOME 50 workaround until a `gnomeos-51` run proves it obsolete — inventory, ground rules and validation procedure in [`references/gnome-51-audit.md`](references/gnome-51-audit.md).
+
 ## Remote session commands from the runner container
 
 Commands that access the GNOME user session, including `gsettings`, `gdbus
@@ -87,14 +109,22 @@ The SSH connection itself does not inherit `DBUS_SESSION_BUS_ADDRESS` or
 `WAYLAND_DISPLAY`; without this prefix, remote session calls can target no bus
 or the wrong user session and produce misleading test failures.
 
-In container mode (or nested test runners), `environment.py` automatically writes
-`/tmp/session.env` at session initialization with the active `DBUS_SESSION_BUS_ADDRESS`,
-`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`, and `XDG_SESSION_TYPE`. `_run_host()` ensures
-the file is present and executes commands under bash so POSIX `/bin/sh` does not
-abort on missing file errors.
+In container mode, `environment.py` writes `/tmp/session.env` at session init with the
+active session addresses; `_run_host()` sources it and runs under bash so `/bin/sh`
+does not abort on a missing file.
+
+## GNOME 51 accessibility gsettings round-trips (@requires_gnome_51)
+
+GNOME 51 added two `org.gnome.desktop.a11y.interface` settings pre-51 images lack
+(confirmed against the schema source, never guessed): `reduced-motion` (enum
+`no-preference`/`reduce`) and `keyboard-focus-visible-timeout` (int; `0`=forever,
+`<0`=toolkit default, shipped `-1`). Round-trip them like the smoke suite's
+high-contrast scenario in `tests/vanilla-gnome/features/gnome_accessibility_51.feature`,
+gated with `@requires_gnome_51` and skipped at runtime via a `gnome-shell --version`
+probe in `environment.py` — a probe that cannot run skips rather than fails; run
+over SSH with the session-env prefix above.
 
 ## GNOME Shell extensions and AT-SPI health in smoke
-
 Use the public `org.gnome.Shell.Extensions.GetExtensionInfo` D-Bus method to
 assert an extension is enabled (`state` `1`). If the scenario promises visible
 product behavior, enabled state is only the first diagnostic and must not
@@ -102,6 +132,7 @@ replace a rendering assertion. For Dash-to-Dock v106, recursively traverse the
 public Clutter actor tree for its source-defined `dashtodockContainer` name and
 require the actor to be mapped, visible, allocated, opaque, and slid open. Do
 not inspect the extension's private `stateObj` or `dockManager` object graph.
+See `tests/extensions/README.md` for Hive suite contracts (Context7: `/behave/behave`, `/websites/gjs_guide`).
 
 When querying installed or enabled extensions in container mode, `gnome-extensions`
 CLI may block if the desktop Settings portal times out; fall back to calling
@@ -129,38 +160,11 @@ In GNOME 50:
 In GNOME 50, Firefox exposes its top-level window as `filler` or `frame` in AT-SPI, while web content and iframes within tabs also expose nested `frame` nodes (often containing child widgets such as `push button`). When tabs crash under containerized or headless environments, Firefox may also spawn `Tab crash reporter — Mozilla Firefox` frame nodes in the AT-SPI tree.
 
 To resolve the genuine browser window reliably:
-1. Query registered application name as `"Firefox"` first in `FIREFOX_APP_NAMES` to avoid a 10s retry timeout against `"firefox"`.
+1. Resolve the app with `_firefox_app()`, which first scans the live `tree.root.applications()` list matching `FIREFOX_APP_NAMES` case-insensitively (falling back to the qecore `context.firefox.instance`), polling until a short elapsed-time deadline (3 s by default). There is no per-name `tree.root.application()` fallback: dogtail retries that call internally, multiplying the deadline.
 2. Filter out Mozilla crash reporter windows (`"crash reporter" in name.lower()`) so stale or crashed frames carrying a `page tab list` are not misidentified as browser windows.
 3. Prioritize top-level candidates (`app.children`) before recursive searching, and require genuine browser chrome: `combo box`, `entry`, `autocomplete`, or `page tab list`. In GNOME 50, the Firefox address bar exposes role `combo box` (name `"Search with Google or enter address"`), and buttons use role `button`.
 4. In headless Wayland container environments where `/dev/uinput` evdev keystrokes are not routed to windows by the compositor, provide an AT-SPI fallback via `atspi_click` targeting the `"Open a new tab (Ctrl+T)"` and tab `"Close tab"` buttons.
 5. In headless Wayland environments, character entry via uinput maps punctuation and shifted keys (e.g. ':', uppercase) through an evdev lookup to avoid NoneType unpack errors. For Firefox URL navigation, remote IPC navigation provides a fallback when headless compositors drop input keystrokes, and address assertions accept both domain prefixes and loaded document titles. Clean shutdown falls back to process termination if uinput `<Ctrl><Q>` is unrouted.
-
-## Overview search entry
-
-
-**Do not** call `Main.overview._onSearchChanged()` — it was removed in GNOME 47.
-Use `clutter_text.set_text()` which emits the `text-changed` signal and
-triggers the search controller via the public signal path:
-
-```python
-_shell_eval(f'Main.overview.searchEntry.clutter_text.set_text("{text}")')
-```
-
-To read back the current search text:
-```python
-_shell_eval('Main.overview.searchEntry.clutter_text.get_text()')
-# returns: (true, 'Files')  — parse with regex on the second element
-```
-
-## Activities overview (GNOME 50 QEMU)
-
-
-`Main.overview.visible.toString()` consistently returns `false` in QEMU on GNOME 50
-even after `Main.overview.show()` is called. Do NOT assert `Main.overview.visible` or
-switch to `Main.overview._shown` without confirming on a live GNOME 50 QEMU run —
-the behavior is not reproducible locally without a full VM boot. Scenarios that depend
-on overview visibility must be quarantined (`@quarantine`) until the correct GNOME 50
-API is confirmed.
 
 ## Screenshot on failure
 
@@ -178,6 +182,8 @@ def after_scenario(context, scenario):
 `take_screenshot()` calls the native `org.gnome.Shell.Screenshot` D-Bus API.
 Do not call `context.sandbox.shell.eval_js(...)` for screenshots — in qecore
 4.16 `sandbox.shell` is an accessibility object and has no `eval_js` method.
+
+From the runner container the capture goes over SSH and falls back `grim` -> `gnome-screenshot -f` -> `org.gnome.Shell.Screenshot` gdbus. Every remote command must source `/tmp/session.env` or the Wayland variables are absent and all three fail, and a stale PNG at the target path is deleted first so a leftover file is never reported as a fresh screenshot. Both invariants are covered by `tests/unit/test_screenshot_capture.py`.
 
 ## GNOME Extensions CLI (subprocess)
 
@@ -240,8 +246,8 @@ runner container over SSH.
 
 Bluefin's 9 bundled extensions each get a named scenario in
 `tests/smoke/features/bluefin_extensions.feature`. Tag the
-`search-light@icedman.github.com` scenario with `@bluefin` so dakota smoke runs
-skip it via `environment.py`.
+`search-light@icedman.github.com` scenario `@bluefin` and guard it with
+`... is installed, otherwise skip on GNOME 51+` (missing on older shells fails).
 
 Use the distinct step phrase `GNOME extension "{uuid}" is enabled` (not
 bazzite's `Extension "{uuid}" is enabled`) to avoid cross-suite step collisions.
@@ -249,18 +255,16 @@ bazzite's `Extension "{uuid}" is enabled`) to avoid cross-suite step collisions.
 ## Bazaar on Bluefin: wait out the Refreshing spinner
 
 
-Bluefin ships **Bazaar** (`io.github.kolunmi.Bazaar`), not GNOME Software's old
-Explore/Installed toggle-button layout. For Bazaar UI tests:
-
-- wait for a visible window named **`Bazaar`**
-- then poll until any visible tab named **`Curated`**, **`Explore`**,
-  **`Library`**, or **`Search`** appears
-- accept both `page tab` and `toggle button` roles for those tabs
-
-The first launch often shows a **Refreshing** spinner page before the
-`AdwViewStack` content is ready. On GNOME 50, AT-SPI cache drops can also make
-nodes disappear mid-query, so wrap Bazaar window/tab lookups in retry loops
-with short sleeps and re-query the tree each attempt.
+Bluefin ships **Bazaar** (`io.github.kolunmi.Bazaar`), not GNOME Software. Its
+AT-SPI application is named **`bazaar`** (GTK4 uses the prgname), never
+`gnome-software`/`Bazaar`. Poll `tree.root.applications()` against one
+monotonic deadline: a missed `tree.root.application(name)` in a loop ran
+run 41182977349 for 100 minutes. A view is loaded only when its
+`AdwViewStackPage` `panel` has showing descendants, because the header tabs stay
+visible behind the first-launch **Refreshing** page (allow ~120 s). Search by
+typing into the window, then assert the field text and a result `label`. Quit
+with `<Ctrl><Q>`. Only `@bazaar_ui` scenarios get qecore hooks and a
+`flatpak kill`. Details: [Bazaar lookup](references/atspi.md#bazaar-gtk4-flatpak).
 
 ## Desktop notifications via gdbus (smoke suite)
 
@@ -280,16 +284,13 @@ Parse the ID from `context.notify_output` with `re.search(r'\(uint32 (\d+),\)', 
 
 ## Smoke desktop-identity checks: use `_run_host` + session env
 
-
 For smoke steps that need session-scoped shell state (`XDG_SESSION_TYPE`,
 `DISPLAY`, `WAYLAND_DISPLAY`) or VM-installed tools like `glxinfo`, prefer the
 suite-local `_run_host(...)` helper over plain `subprocess.run(...)`.
 
-Why: local smoke scenarios execute inside the VM during ad-hoc runs, but CI can
-run them from the Fedora runner container. `_run_host(...)` transparently hops
-to the VM over SSH in that case, and `source /tmp/session.env 2>/dev/null; ...`
-preserves the GNOME user-session environment before probing Wayland or renderer
-state.
+Why: local smoke scenarios run inside the VM, but CI can run them from the Fedora
+runner container. `_run_host(...)` transparently hops to the VM over SSH and sources
+`/tmp/session.env` to preserve the GNOME user-session environment.
 
 ## Unit-testing smoke step modules
 
@@ -343,11 +344,21 @@ FIREFOX_A11Y_ENV = {
 context.firefox_launch_target = launch_background(FIREFOX_LAUNCH_TARGETS, env=FIREFOX_A11Y_ENV)
 ```
 
-`launch_background(targets, env=...)` in `tests/smoke/features/steps/app_support.py`
+`launch_background(targets, env=...)` in `tests/shared/app_support.py`
 applies `env` on every launch path: exported before the command in SSH mode,
 merged into `os.environ` for local `Popen`, and forwarded across the Flatpak
 sandbox boundary with `--env=`. Environment set outside a Flatpak sandbox is
 **not** visible inside it — always use the `env=` parameter, never a shell prefix.
+
+SSH-mode launches go through `detached_launch_command()` in
+`tests/shared/app_support.py`. It starts the app in a transient
+`systemd-run --user` unit, not as a `nohup ... & disown` child of the SSH
+session. Dakota's logind uses `KillUserProcesses=yes`, systemd's upstream
+default, so it SIGTERMs everything left in the SSH session scope when the
+connection closes. A `nohup` child dies before it maps a window. The VM serial
+log then shows `session-cN.scope: Killing process ... (nohup)`, and the test
+reports that Files or Settings was "not found via AT-SPI". Never hand-roll
+`nohup ... & disown` over SSH for a GUI app.
 
 An **exported Flatpak desktop entry is a trap**: an app ID under
 `/var/lib/flatpak/exports/share/applications/` looks like an ordinary desktop
@@ -387,7 +398,7 @@ Unconditional `sleep(N)` calls inflate suite time — avoid them. Rules:
 
 1. **`launch_background()` from qecore** — do NOT add `sleep(1)` after calling qecore's built-in `launch_background()`. The immediately-following "window is accessible" step has its own AT-SPI polling loop; the launch sleep is redundant there.
 
-   **EXCEPTION — `_launch_app()` custom launcher**: The suite-local `_launch_app()` in `gnome_apps_steps.py` uses D-Bus app activation (`gio open` or `gtk-launch`), which is **asynchronous**. `sleep(1)` after a successful `_launch_app()` return is **required** as a D-Bus activation settle time — without it, `_wait_for_window()` starts polling before the process has registered with the AT-SPI accessibility bus, exhausts all retries (~10s), and fails on slower images (e.g. Dakota testing). Do not remove this sleep. The regression in PR #465 was caused by removing it.
+   **EXCEPTION — `_launch_app()` custom launcher**: The suite-local `_launch_app()` in `gnome_apps_steps.py` uses D-Bus app activation (`gio open` or `gtk-launch`), which is **asynchronous**. `sleep(1)` after a successful `_launch_app()` return is **required** as a D-Bus activation settle time — without it, `_wait_for_window()` starts polling before the process has registered with the AT-SPI accessibility bus, exhausts its 15 s elapsed-time deadline, and fails on slower images (e.g. Dakota testing). Do not remove this sleep. The regression in PR #465 was caused by removing it.
 
 2. **Polling loop intervals** — use 0.2s intervals in retry loops (`for _ in range(N): sleep(0.2)`). 0.5s is the old default; the loops already exit-early on success so tighter intervals help.
 
@@ -400,7 +411,6 @@ Unconditional `sleep(N)` calls inflate suite time — avoid them. Rules:
 The pattern `for _ in range(N): ... sleep(X)` that returns early already IS exit-early. The gains come from removing the PRECEDING unconditional sleep, not from changing the loop.
 
 ## Red Flags
-
 
 - Using `'true' in out` to check a Shell.Eval result (success_bool is always true)
 - Calling `Shell.Eval` without first setting `global.context.unsafe_mode = true`
@@ -417,7 +427,6 @@ The pattern `for _ in range(N): ... sleep(X)` that returns early already IS exit
 - A session-readiness loop caches the D-Bus session address or treats a missing bus socket as fatal (breaks across the qecore-headless GDM restart)
 
 ## Verification
-
 
 - [ ] Shell.Eval results extracted with `_eval_bool()` / regex on second tuple element, never `'true' in out`
 - [ ] `unsafe_mode=true` set before any Shell.Eval that reads protected state
@@ -437,14 +446,12 @@ The pattern `for _ in range(N): ... sleep(X)` that returns early already IS exit
 
 ## Red Flags
 
-
 - New smoke app steps hardcode `/usr/share/applications/...` for Flatpak-only apps
 - Step code uses `findChild(..., requireResult=...)`
 - New GNOME steps duplicate existing step phrases in the suite
 - New launch steps add unconditional post-launch sleeps instead of relying on accessibility polling
 
 ## Verification
-
 
 - [ ] Reused existing GNOME/smoke helpers before adding new ones
 - [ ] Launch targets prefer desktop files, with Flatpak or command fallback only when needed
@@ -456,32 +463,24 @@ The pattern `for _ in range(N): ... sleep(X)` that returns early already IS exit
 
 ## Session readiness across a GDM restart
 
+`qecore-headless` restarts GDM, destroying the session D-Bus socket and bringing
+up a fresh autologin session. `tests/shared/wait_for_shell.py` is the canonical
+helper; key contract points:
 
-`qecore-headless` restarts GDM, which destroys the session D-Bus socket and
-brings up a fresh autologin session. `tests/shared/wait_for_shell.py` is the
-canonical readiness helper and encodes the resulting contract:
-
-- `ServiceUnknown` (bus up, `org.gnome.Shell` unowned) and
-  `Could not connect: No such file or directory` (socket gone, GDM restarting)
-  are **both retryable**, never terminal.
-- The session bus address is **re-resolved on every attempt**
-  (`resolve_session_bus_env()`); an address or connection cached before the
-  restart points at a destroyed socket and can never recover. The address is
-  never *unset* — an empty `DBUS_SESSION_BUS_ADDRESS` sends `gdbus` down the
-  `dbus-launch --autolaunch` path instead of the real session socket.
-- Readiness must hold for two consecutive checks so a check does not latch onto
-  the outgoing session moments before GDM tears it down.
-- The loop is bounded by a 300s wall-clock deadline, and the timeout message
-  reports a per-error-class attempt breakdown plus the last error.
-- When the socket file is absent the probe short-circuits instead of spawning
-  `gdbus`, because an unreachable/empty address sends GIO down the
-  `dbus-launch --autolaunch` path, which cannot work in the test container.
+- `ServiceUnknown` (bus up) and `Could not connect: No such file or directory`
+  (socket gone) are **both retryable**. The bus address is **re-resolved every
+  attempt** (`resolve_session_bus_env()`): a cached address points at a destroyed
+  socket, and an empty `DBUS_SESSION_BUS_ADDRESS` hits the `dbus-launch` path, so
+  the address is never *unset*.
+- Readiness must hold across **two consecutive** checks (never latch onto the
+  outgoing session), within a 300s deadline that reports a per-error-class
+  breakdown on timeout; an absent socket short-circuits instead of spawning
+  `gdbus`.
 - `collect_session_diagnostics()` snapshots socket presence, `loginctl
-  list-sessions` and `systemctl status gdm` on the first failure, every 15th
-  failure, and at timeout. If the socket never returns and no user session is
-  listed, the fault is lane-side GDM provisioning, not this helper.
+  list-sessions` and `systemctl status gdm` on first/15th/timeout failure. No
+  socket return plus no listed session => lane-side GDM provisioning fault.
 
-Reuse this helper rather than writing a new `gdbus`-poll loop. See
+Reuse this helper rather than a new `gdbus`-poll loop. See
 `docs/skills/ci-ops/ops/references/qecore-headless-restarts-gdm-bus-socket-churn.md`.
 
 ## On-demand references
@@ -492,3 +491,8 @@ Load these when you hit the specific topic:
 - [Top-bar interactions and Shell.Eval parsing on GNOME 50+.](references/top-bar.md)
 - [MIME, display, and session configuration in containerized tests.](references/display-config.md)
 - [Deep dive: Preinstalled Flatpak desktop app launch checks](references/preinstalled-flatpak-desktop-app-launch-checks.md)
+- [GNOME 50 workaround audit against GNOME 51 (issue #827)](references/gnome-51-audit.md)
+
+## Overview, clone paint, and helper fault injection (issue #919)
+
+Drive the overview via `Shell.Eval` plus a teardown entry; the clone paint proof requires the original to keep the effect while the clone owns none. Helper-driven extensions exercise the JS error branch via `installed_path(info)` plus a `<helper>.py.test-backup` swap. The owned-process assertion lives in `tests.shared.guest_owned_processes`; `assert_no_guest_owned_processes(context, ("needle",))` walks `/proc` from inside the guest because a host `pgrep` cannot distinguish a leaked subprocess from unrelated host processes. The script body is exposed as `WALKER_SCRIPT` so `tests/unit/test_guest_owned_processes_walker.py` can compile it and pin the argv shape (`ExtensionSession.command` runs `subprocess.run` without a shell — passing the script as a single argv element to `python3 -c` is mandatory).

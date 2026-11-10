@@ -1,18 +1,21 @@
-"""Unit tests for tests/smoke/features/steps/app_support.py.
+"""Unit tests for tests/shared/app_support.py.
 
-Tests _desktop_path, _flatpak_available, launch_target_available, and
-launch_background using mocks — no real filesystem or subprocesses required.
+Tests _desktop_path, _flatpak_available, launch_target_available,
+launch_background and atspi_click using mocks — no real filesystem or
+subprocesses required.
 
-All tests force _IN_CONTAINER=False so the non-SSH local-filesystem code paths
-are exercised (the SSH paths are for behave runs inside the runner container).
+Most classes force _IN_CONTAINER=False to exercise the local-filesystem code
+paths; TestContainerMode forces it True to cover the SSH paths that behave
+uses inside the runner container.
 """
 
+import shlex
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from tests.smoke.features.steps import app_support
+from tests.shared import app_support
 
 # Force non-container mode for all tests in this module.
 _no_container = patch.object(app_support, "_IN_CONTAINER", False)
@@ -86,7 +89,7 @@ class TestFlatpakAvailable:
 
     def test_returns_true_when_flatpak_info_succeeds(self):
         fake_result = SimpleNamespace(returncode=0)
-        with patch("tests.smoke.features.steps.app_support.subprocess.run",
+        with patch("tests.shared.app_support.subprocess.run",
                    return_value=fake_result) as mock_run:
             result = app_support._flatpak_available("org.gnome.Calculator")
 
@@ -98,7 +101,7 @@ class TestFlatpakAvailable:
 
     def test_returns_false_when_flatpak_info_fails(self):
         fake_result = SimpleNamespace(returncode=1)
-        with patch("tests.smoke.features.steps.app_support.subprocess.run",
+        with patch("tests.shared.app_support.subprocess.run",
                    return_value=fake_result):
             result = app_support._flatpak_available("io.missing.App")
 
@@ -141,7 +144,7 @@ class TestLaunchTargetAvailable:
     def test_returns_true_for_available_flatpak(self):
         targets = (("flatpak", "org.gnome.Calculator"),)
         fake_result = SimpleNamespace(returncode=0)
-        with patch("tests.smoke.features.steps.app_support.subprocess.run",
+        with patch("tests.shared.app_support.subprocess.run",
                    return_value=fake_result):
             assert app_support.launch_target_available(targets) is True
 
@@ -151,7 +154,7 @@ class TestLaunchTargetAvailable:
             ("flatpak", "io.missing.App"),
         )
         with patch.object(app_support.shutil, "which", return_value=None):
-            with patch("tests.smoke.features.steps.app_support.subprocess.run",
+            with patch("tests.shared.app_support.subprocess.run",
                        return_value=SimpleNamespace(returncode=1)):
                 assert app_support.launch_target_available(targets) is False
 
@@ -182,7 +185,7 @@ class TestLaunchBackground:
     def test_launches_command_when_available(self):
         targets = (("command", "bash"),)
         with patch.object(app_support.shutil, "which", return_value="/usr/bin/bash"):
-            with patch("tests.smoke.features.steps.app_support.subprocess.Popen") as mock_popen:
+            with patch("tests.shared.app_support.subprocess.Popen") as mock_popen:
                 result = app_support.launch_background(targets)
 
         assert result == "command:bash"
@@ -193,7 +196,7 @@ class TestLaunchBackground:
         (tmp_path / desktop_id).write_text("")
         targets = (("desktop", desktop_id),)
         with patch.object(app_support, "DESKTOP_DIRS", (str(tmp_path),)):
-            with patch("tests.smoke.features.steps.app_support.subprocess.Popen") as mock_popen:
+            with patch("tests.shared.app_support.subprocess.Popen") as mock_popen:
                 result = app_support.launch_background(targets)
 
         assert result == f"desktop:{desktop_id}"
@@ -201,9 +204,9 @@ class TestLaunchBackground:
 
     def test_launches_flatpak_when_available(self):
         targets = (("flatpak", "org.gnome.Calculator"),)
-        with patch("tests.smoke.features.steps.app_support.subprocess.run",
+        with patch("tests.shared.app_support.subprocess.run",
                    return_value=SimpleNamespace(returncode=0)):
-            with patch("tests.smoke.features.steps.app_support.subprocess.Popen") as mock_popen:
+            with patch("tests.shared.app_support.subprocess.Popen") as mock_popen:
                 result = app_support.launch_background(targets)
 
         assert result == "flatpak:org.gnome.Calculator"
@@ -246,7 +249,7 @@ class TestLaunchEnvironment:
     def test_command_launch_merges_env_into_os_environ(self):
         targets = (("command", "bash"),)
         with patch.object(app_support.shutil, "which", return_value="/usr/bin/bash"):
-            with patch("tests.smoke.features.steps.app_support.subprocess.Popen") as mock_popen:
+            with patch("tests.shared.app_support.subprocess.Popen") as mock_popen:
                 app_support.launch_background(targets, env={"GNOME_ACCESSIBILITY": "1"})
 
         passed = mock_popen.call_args.kwargs["env"]
@@ -256,16 +259,16 @@ class TestLaunchEnvironment:
     def test_command_launch_without_env_inherits_environ(self):
         targets = (("command", "bash"),)
         with patch.object(app_support.shutil, "which", return_value="/usr/bin/bash"):
-            with patch("tests.smoke.features.steps.app_support.subprocess.Popen") as mock_popen:
+            with patch("tests.shared.app_support.subprocess.Popen") as mock_popen:
                 app_support.launch_background(targets)
 
         assert mock_popen.call_args.kwargs["env"] is None
 
     def test_flatpak_launch_forwards_env_into_sandbox(self):
         targets = (("flatpak", "org.mozilla.firefox"),)
-        with patch("tests.smoke.features.steps.app_support.subprocess.run",
+        with patch("tests.shared.app_support.subprocess.run",
                    return_value=SimpleNamespace(returncode=0)):
-            with patch("tests.smoke.features.steps.app_support.subprocess.Popen") as mock_popen:
+            with patch("tests.shared.app_support.subprocess.Popen") as mock_popen:
                 app_support.launch_background(targets, env={"GNOME_ACCESSIBILITY": "1"})
 
         assert mock_popen.call_args.args[0] == [
@@ -273,7 +276,7 @@ class TestLaunchEnvironment:
         ]
 
     def test_ssh_launch_exports_env_before_command(self):
-        with patch("tests.smoke.features.steps.app_support.subprocess.run") as mock_run:
+        with patch("tests.shared.app_support.subprocess.run") as mock_run:
             app_support._ssh_launch("firefox", {"GNOME_ACCESSIBILITY": "1"})
 
         remote_cmd = mock_run.call_args.args[0][-1]
@@ -311,7 +314,7 @@ class TestFlatpakExportedDesktopEntries:
         (export_dir / desktop_id).write_text("")
 
         with patch.object(app_support, "DESKTOP_DIRS", (str(export_dir),)):
-            with patch("tests.smoke.features.steps.app_support.subprocess.Popen") as mock_popen:
+            with patch("tests.shared.app_support.subprocess.Popen") as mock_popen:
                 result = app_support.launch_background(
                     (("desktop", desktop_id),), env={"GNOME_ACCESSIBILITY": "1"}
                 )
@@ -326,7 +329,7 @@ class TestFlatpakExportedDesktopEntries:
         (tmp_path / desktop_id).write_text("")
 
         with patch.object(app_support, "DESKTOP_DIRS", (str(tmp_path),)):
-            with patch("tests.smoke.features.steps.app_support.subprocess.Popen") as mock_popen:
+            with patch("tests.shared.app_support.subprocess.Popen") as mock_popen:
                 result = app_support.launch_background(
                     (("desktop", desktop_id),), env={"GNOME_ACCESSIBILITY": "1"}
                 )
@@ -342,7 +345,7 @@ class TestFlatpakExportedDesktopEntries:
                 "_desktop_path",
                 return_value="/var/lib/flatpak/exports/share/applications/org.mozilla.firefox.desktop",
             ):
-                with patch("tests.smoke.features.steps.app_support.subprocess.run") as mock_run:
+                with patch("tests.shared.app_support.subprocess.run") as mock_run:
                     result = app_support.launch_background(
                         (("desktop", "org.mozilla.firefox.desktop"),),
                         env={"GNOME_ACCESSIBILITY": "1"},
@@ -352,3 +355,228 @@ class TestFlatpakExportedDesktopEntries:
         remote_cmd = mock_run.call_args.args[0][-1]
         assert "flatpak run --env=GNOME_ACCESSIBILITY=1 org.mozilla.firefox" in remote_cmd
         assert "gio launch" not in remote_cmd
+
+
+# ---------------------------------------------------------------------------
+# SSH (runner-container) lookups and launches
+# ---------------------------------------------------------------------------
+
+def _ssh_result(returncode: int = 0, stdout: str = "") -> SimpleNamespace:
+    return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+
+class TestContainerMode:
+    """behave runs in the runner container, so these are the e2e code paths."""
+
+    def setup_method(self):
+        self._container = patch.object(app_support, "_IN_CONTAINER", True)
+        self._container.start()
+
+    def teardown_method(self):
+        self._container.stop()
+
+    def test_desktop_path_probes_vm_dirs_in_order(self):
+        dirs = ("/a", "/b")
+        replies = [_ssh_result(1), _ssh_result(0, "/b/x.desktop\n")]
+        with patch.object(app_support, "DESKTOP_DIRS", dirs):
+            with patch.object(app_support, "_ssh_run", side_effect=replies) as run:
+                assert app_support._desktop_path("x.desktop") == "/b/x.desktop"
+
+        assert [c.args[0] for c in run.call_args_list] == [
+            "test -f /a/x.desktop && echo /a/x.desktop",
+            "test -f /b/x.desktop && echo /b/x.desktop",
+        ]
+
+    def test_desktop_path_ignores_success_with_empty_stdout(self):
+        with patch.object(app_support, "DESKTOP_DIRS", ("/a",)):
+            with patch.object(app_support, "_ssh_run", return_value=_ssh_result(0, "  \n")):
+                assert app_support._desktop_path("x.desktop") is None
+
+    def test_desktop_path_does_not_touch_local_filesystem(self, tmp_path):
+        (tmp_path / "x.desktop").write_text("")
+        with patch.object(app_support, "DESKTOP_DIRS", (str(tmp_path),)):
+            with patch.object(app_support, "_ssh_run", return_value=_ssh_result(1)):
+                assert app_support._desktop_path("x.desktop") is None
+
+    def test_flatpak_available_asks_the_vm(self):
+        with patch.object(app_support, "_ssh_run", return_value=_ssh_result(0)) as run:
+            assert app_support._flatpak_available("org.gnome.Calculator") is True
+        run.assert_called_once_with("flatpak info org.gnome.Calculator 2>/dev/null")
+
+    def test_flatpak_unavailable_on_vm(self):
+        with patch.object(app_support, "_ssh_run", return_value=_ssh_result(1)):
+            assert app_support._flatpak_available("org.gnome.Calculator") is False
+
+    def test_command_target_available_checks_vm_not_runner(self):
+        with patch.object(app_support.shutil, "which", return_value=None):
+            with patch.object(app_support, "_ssh_run", return_value=_ssh_result(0)) as run:
+                assert app_support.launch_target_available((("command", "gnome-calculator"),))
+        run.assert_called_once_with("command -v gnome-calculator")
+
+    def test_command_target_missing_on_vm_falls_through(self):
+        with patch.object(app_support.shutil, "which", return_value="/usr/bin/gnome-calculator"):
+            with patch.object(app_support, "_ssh_run", return_value=_ssh_result(1)):
+                assert not app_support.launch_target_available((("command", "gnome-calculator"),))
+
+    def test_launch_command_over_ssh(self):
+        with patch.object(app_support, "_ssh_run", return_value=_ssh_result(0)):
+            with patch.object(app_support, "_ssh_launch") as launch:
+                with patch("tests.shared.app_support.subprocess.Popen") as popen:
+                    result = app_support.launch_background(
+                        (("command", "gnome-calculator"),), env={"A": "1"}
+                    )
+
+        assert result == "command:gnome-calculator"
+        launch.assert_called_once_with("gnome-calculator", {"A": "1"})
+        popen.assert_not_called()
+
+    def test_launch_skips_command_missing_on_vm(self):
+        with patch.object(app_support, "_ssh_run", return_value=_ssh_result(1)):
+            with patch.object(app_support, "_ssh_launch") as launch:
+                with pytest.raises(AssertionError, match="No launch candidate"):
+                    app_support.launch_background((("command", "gnome-calculator"),))
+        launch.assert_not_called()
+
+    def test_launch_non_flatpak_desktop_uses_gio_launch(self):
+        dp = "/usr/share/applications/org.gnome.Calculator.desktop"
+        with patch.object(app_support, "_desktop_path", return_value=dp):
+            with patch.object(app_support, "_ssh_launch") as launch:
+                with patch("tests.shared.app_support.subprocess.Popen") as popen:
+                    result = app_support.launch_background(
+                        (("desktop", "org.gnome.Calculator.desktop"),)
+                    )
+
+        assert result == "desktop:org.gnome.Calculator.desktop"
+        launch.assert_called_once_with(f"gio launch {dp}", None)
+        popen.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Detached SSH launches (must survive logind KillUserProcesses=yes)
+# ---------------------------------------------------------------------------
+
+class TestDetachedLaunchCommand:
+    def _systemd_run_argv(self, remote_cmd: str) -> list[str]:
+        primary = remote_cmd.split(" || ", 1)[0]
+        argv = shlex.split(primary.split("; ", 1)[1])
+        assert argv[:argv.index("--")] == [
+            "systemd-run", "--user", "--quiet", "--collect", "-p", "KillMode=process",
+        ]
+        return argv
+
+    def test_launches_outside_the_ssh_session_scope(self):
+        remote_cmd = app_support.detached_launch_command("nautilus")
+
+        argv = self._systemd_run_argv(remote_cmd)
+        assert argv[argv.index("--") + 1:argv.index("--") + 3] == ["/bin/bash", "-c"]
+        inner = argv[argv.index("--") + 3]
+        assert inner == "source /tmp/session.env 2>/dev/null; exec nautilus"
+
+    def test_unit_receives_session_env_and_launch_env(self):
+        remote_cmd = app_support.detached_launch_command(
+            "gnome-control-center wifi", {"GTK_A11Y": "atspi"},
+        )
+
+        argv = self._systemd_run_argv(remote_cmd)
+        inner = argv[argv.index("--") + 3]
+        assert inner == (
+            "source /tmp/session.env 2>/dev/null; "
+            "export GTK_A11Y=atspi; exec gnome-control-center wifi"
+        )
+
+    def test_falls_back_to_nohup_without_systemd_run(self):
+        remote_cmd = app_support.detached_launch_command("nautilus", {"A": "1"})
+
+        fallback = remote_cmd.split(" || ", 1)[1]
+        assert fallback == "{ export A=1; nohup nautilus </dev/null &>/dev/null & disown; }"
+
+    def test_ssh_launch_uses_detached_command(self):
+        with patch("tests.shared.app_support.subprocess.run") as mock_run:
+            app_support._ssh_launch("nautilus")
+
+        remote_cmd = mock_run.call_args.args[0][-1]
+        assert remote_cmd == app_support.detached_launch_command("nautilus")
+        assert "systemd-run --user" in remote_cmd
+
+
+# ---------------------------------------------------------------------------
+# atspi_click
+# ---------------------------------------------------------------------------
+
+class _FakeNode:
+    def __init__(self, actions=None, failing=(), actions_error=None):
+        self._actions = actions if actions is not None else {}
+        self._failing = set(failing)
+        self._actions_error = actions_error
+        self.performed: list[str] = []
+        self.clicked = False
+
+    @property
+    def actions(self):
+        if self._actions_error:
+            raise self._actions_error
+        return self._actions
+
+    def do_action_named(self, name):
+        self.performed.append(name)
+        if name in self._failing:
+            raise RuntimeError(f"{name} failed")
+
+    def click(self):
+        self.clicked = True
+
+
+class TestAtspiClick:
+    @pytest.mark.parametrize("in_container", [True, False])
+    def test_prefers_click_action(self, in_container):
+        node = _FakeNode({"activate": None, "press": None, "click": None})
+        with patch.object(app_support, "_IN_CONTAINER", in_container):
+            app_support.atspi_click(node)
+        assert node.performed == ["click"]
+        assert not node.clicked
+
+    def test_press_used_when_no_click_action(self):
+        node = _FakeNode({"activate": None, "press": None})
+        with patch.object(app_support, "_IN_CONTAINER", True):
+            app_support.atspi_click(node)
+        assert node.performed == ["press"]
+
+    def test_falls_through_when_action_raises(self):
+        node = _FakeNode({"click": None, "press": None, "activate": None},
+                         failing={"click", "press"})
+        with patch.object(app_support, "_IN_CONTAINER", True):
+            app_support.atspi_click(node)
+        assert node.performed == ["click", "press", "activate"]
+
+    def test_container_raises_with_available_actions_when_none_usable(self):
+        node = _FakeNode({"expand or contract": None})
+        with patch.object(app_support, "_IN_CONTAINER", True):
+            with pytest.raises(RuntimeError, match=r"available=\['expand or contract'\]"):
+                app_support.atspi_click(node)
+        assert not node.clicked
+
+    def test_container_raises_when_every_action_fails(self):
+        node = _FakeNode({"click": None}, failing={"click"})
+        with patch.object(app_support, "_IN_CONTAINER", True):
+            with pytest.raises(RuntimeError, match="no usable AT-SPI action"):
+                app_support.atspi_click(node)
+
+    def test_unreadable_actions_treated_as_none(self):
+        node = _FakeNode(actions_error=RuntimeError("defunct"))
+        with patch.object(app_support, "_IN_CONTAINER", True):
+            with pytest.raises(RuntimeError, match=r"available=\[\]"):
+                app_support.atspi_click(node)
+
+    def test_none_actions_treated_as_none(self):
+        node = _FakeNode()
+        node._actions = None
+        with patch.object(app_support, "_IN_CONTAINER", True):
+            with pytest.raises(RuntimeError, match=r"available=\[\]"):
+                app_support.atspi_click(node)
+
+    def test_local_run_falls_back_to_coordinate_click(self):
+        node = _FakeNode({"click": None}, failing={"click"})
+        with patch.object(app_support, "_IN_CONTAINER", False):
+            app_support.atspi_click(node)
+        assert node.performed == ["click"]
+        assert node.clicked

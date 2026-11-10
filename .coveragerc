@@ -1,7 +1,8 @@
 [run]
 parallel = True
-source = tests
+source = tests,scripts,dashboard/scripts
 patch = subprocess
 
 [report]
 show_missing = True
+include_namespace_packages = True

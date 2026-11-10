@@ -8,7 +8,31 @@ metadata:
 ---
 # Troubleshooting
 
+## Extension ZIP pre-stage validation
+
+Before staging extension artifacts, run
+`python -m tests.shared.gnome_extensions_artifacts path/to/*.zip` from the
+pinned testsuite checkout. It requires one archive per canonical UUID and
+rejects duplicate members, traversal/absolute/non-canonical paths, symlinks,
+special files, and file/directory aliases **before reading metadata**. These
+are `artifact` failures, not GNOME Shell compatibility failures. Ordinary
+explicit directory entries are supported; do not sanitize a rejected ZIP
+and continue with a different artifact.
+
+This is structural validation, not a sandbox or provenance attestation:
+canonical ZIP hashes are not pinned yet. It does not extract, execute code,
+or prove a genuine GNOME OS session passed. Candidate extraction and execution
+still belong only in a fresh disposable guest without publishing credentials.
+
 ## Debugging failures
+
+### A script missing from the sparse checkout fails silently
+
+**Root cause:** the testsuite checkout in `e2e.yml` is a non-cone sparse checkout, so only the paths listed in its `sparse-checkout` block exist on the runner. A step that invokes a script not on that list runs against a missing file.
+
+**Evidence:** the step fails with a confusing "no such file" error, or, when the step is a guard allowed to soft-fail, the guard never runs and the problem it existed to catch ships undetected.
+
+**Fix:** add the exact script path to that job's `sparse-checkout` list in the same change that makes a step call it (see the rule in [SKILL.md](../SKILL.md)).
 
 ### podman load exits 125 (all GUI suites fail at "Load runner container into VM")
 
@@ -50,12 +74,20 @@ metadata:
 
 **Fix:** Pass `test_ref` through the `workflow_dispatch` caller (`manual.yml`, `migration-test.yml`, or another wrapper) using `github.ref_name` on the **workflow_dispatch** side (where it correctly reflects the dispatched branch), then forward it as an input to `e2e.yml`. Inside `e2e.yml`, the checkout must use `inputs.test_ref` directly — never `github.ref_name`. See ops.md "test_ref and github.ref_name" for the exact pattern.
 
+### Install OCI image fails: "root partition 3 has type <none>"
+
+**Root cause:** bootc 1.17+ (Dakota since 2026-11-01) checks the new root partition's DPS type through `lsblk`/udev about 200 ms after `sfdisk` re-reads the partition table. On GitHub-hosted runners udev has not always processed `loopNp3` by then, so `lsblk` reports no type and bootc aborts before writing anything. It is a race, not a property of the image: runs of the same Dakota image before and after got past it.
+
+**Evidence:** run 42611596358 — `error: Installing to disk: Creating rootfs: root partition 3 has type <none>; expected 4f68bce3-e8cd-4db1-96e7-fbcaf984b709`, about 0.2 s after `Calling ioctl() to re-read partition table`.
+
+**Fix:** the "Install OCI image and configure disk" step in `e2e.yml` retries `bootc install to-disk` (3 attempts) whenever no ostree deployment was written, and fails with a `bootc install wrote no deployment` annotation naming the image and bootc's `error:` line if every attempt fails. Do not retry when the deployment *was* written: `bootupd is required for ostree-based installs` (bootc 1.17+ with `--bootloader systemd`) is the expected late bootloader failure, and direct kernel boot continues past it.
+
 ### SSH never became ready
 
 Check the serial log artifact. Common causes:
-- ostree deployment missing: `bootc install` exited before writing layers (check for `ERROR: ostree deployment missing` in the install step)
+- ostree deployment missing: `bootc install` exited before writing layers on every attempt (look for the `bootc install wrote no deployment` annotation in the install step; it quotes bootc's error)
 - Kernel args wrong: `root=UUID=…` mismatch — verify `ROOT_UUID` in the install step output
-- `selinux=0` is set, so SELinux policy isn't the cause
+- SELinux denial: the guest boots enforcing. Check `results/selinux/` in the results artifact and the serial log for `avc:  denied`; an unlabeled harness file means the install step's labeling missed it. See [selinux-enforcing.md](selinux-enforcing.md)
 
 ### GNOME session did not start
 
@@ -112,3 +144,31 @@ database without replacing the image default.
 **Pattern**: Python helper scripts (such as `compile_data.py`) executed from repository root inside GitHub Actions, but developed locally inside subdirectories, must resolve their base directories dynamically relative to `Path(__file__)` rather than hardcoding relative string paths like `./raw-runs`. This avoids directory execution discrepancies between local and CI environments.
 
 **Pattern**: In Astro static sites, using `import.meta.glob('../data/runs/*.json', { eager: true })` to load detailed raw JSON files at build-time allows robust, offline-safe compilation of metrics, sparklines, and broken scenario aggregations directly from logs, entirely removing runtime client-side fetch or API performance overhead.
+
+## `atspi_tree.txt` is missing from the artefacts
+
+Artefact paths come from `tests/shared/results_dir.resolve_results_dir(context)`, which
+resolves behave userdata `results_dir` first, then `TESTSUITE_RESULTS_DIR`, then the
+`/tmp/results` default. `timing.py`, `screenshot.py`, `kde_faillog.py` and the AT-SPI tree
+dump all route through it, so a run with an overridden results dir keeps its artefacts
+together. A hardcoded `/tmp/results` literal writes outside that directory and the file
+never reaches the uploaded artefact.
+
+This fails silently: both `after_all` tree-dump sites sit inside `except Exception: pass`,
+so a broken path or a missing import surfaces as "no `atspi_tree.txt`" and nothing else.
+`tests/unit/test_suite_environment_contract.py` guards it by asserting no `after_all`
+contains a `/tmp/results` literal. Resolve the directory once and reuse it for both the
+existence check and the write.
+
+## Scenario timing and SLA reporting contract
+
+`tests/shared/timing.py` appends scenario run metrics to `timings.jsonl` in the results
+directory. The `gnome-e2e` composite action reads back `results/timings.jsonl` to report SLA
+violations in job summaries.
+
+- SLAs are defined solely via scenario tags matching `@sla_<n>s` (e.g. `@sla_10s`).
+- Scenarios without an `@sla_<n>s` tag do not have a default SLA (`sla_s: null`) and do not violate.
+- Violations are reported and surfaced as warnings in CI summaries; they do not fail the scenario run directly.
+- Strict gating is driven by the `results-timing` recipe in `Justfile` checking `TIMING_SLA_STRICT=1` (exiting 1 on violations), not by module-level constants in `timing.py`.
+- `tests/unit/test_timing_contract.py` validates that all keys consumed by the action summariser and the `results-timing` recipe in `Justfile` are produced by `timing.py:record_end` and ensures unconsumed public configuration constants are not added to `timing.py`.
+

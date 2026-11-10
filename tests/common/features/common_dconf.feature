@@ -12,10 +12,17 @@ Feature: Bluefin common dconf and GSettings defaults
     * Run SSH command: "python3 -c 'import gi; gi.require_version(\"Gio\", \"2.0\"); from gi.repository import Gio; v = Gio.Settings.new(\"org.gnome.shell\").get_default_value(\"enabled-extensions\"); print(v.unpack() if v else [])'"
     * Last command output contains "custom-command-list@storageb.github.com"
 
+  # Both scenarios assert the Logo Menu -> custom-command-list swap shipped by
+  # projectbluefin/common; they skip on images outside ghcr.io/projectbluefin/*
+  # whose effective enabled-extensions value predates it (e.g.
+  # ghcr.io/ublue-os/bluefin) and activate once it lands. projectbluefin
+  # images never skip, so dropping the extension there fails loudly.
+  @requires_custom_command_list
   Scenario: legacy Logo Menu extension is not enabled
     * Run SSH command: "gsettings get org.gnome.shell enabled-extensions"
     * SSH command output does not contain "logomenu@aryan_k"
 
+  @requires_custom_command_list
   Scenario: custom-command-list menu icon is configured
     * Run SSH command: "dconf read /org/gnome/shell/extensions/custom-command-list/menuicon-setting"
     * SSH command return code is "0"
@@ -77,6 +84,8 @@ Feature: Bluefin common dconf and GSettings defaults
     * SSH command return code is "0"
     * SSH command output stripped "is" "'xdg-terminal-exec'"
 
+  # Bluefin's pinned common still ships Searchlight; Utah's newer pin does not (#1076).
+  @skip_utah
   Scenario: Searchlight extension is configured
     * Run SSH command: "dconf read /org/gnome/shell/extensions/search-light/shortcut-search"
     * SSH command return code is "0"

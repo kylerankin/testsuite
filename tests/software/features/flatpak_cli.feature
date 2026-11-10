@@ -15,12 +15,12 @@ Feature: Flatpak CLI smoke tests
   Scenario: flatpak user override round-trip succeeds
     # Calculator is always present; override doesn't require the app to be installed.
     * Set flatpak user override "--filesystem=home" for "org.gnome.Calculator"
-    * Flatpak user override "filesystem=home" is active for "org.gnome.Calculator"
+    * Flatpak user override for "org.gnome.Calculator" grants "filesystems" value "home"
     * Reset flatpak user overrides for "org.gnome.Calculator"
     * No flatpak user overrides exist for "org.gnome.Calculator"
 
   # Future: Bluefin ships Bazaar rather than GNOME Software, so this belongs to the
-  # planned gnomeos/GNOME 50 coverage tracked alongside the other #176 scenarios.
+  # planned gnomeos/GNOME 51 coverage tracked alongside the other #847 scenarios.
   @future @software @flatpak_cli
   Scenario: flatpak install and uninstall round-trip succeeds
     # Apostrophe (~5 MB) is a small, stable Flatpak with no heavy runtimes.

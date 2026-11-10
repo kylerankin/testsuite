@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
 import os
 import json
+import re
 import sys
 from pathlib import Path
 from datetime import datetime
+
+# run_id is used as an output filename component. It arrives from an OCI
+# manifest annotation (io.github.projectbluefin.run_id) pulled off GHCR, so
+# treat it as untrusted: allow only a conservative character set and reject
+# anything that could traverse directories ("../", "/", "\\", leading dots).
+SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def sanitize_run_id(run_id):
+    """Return run_id if it is safe to use as a filename component, else ''."""
+    if run_id and SAFE_RUN_ID_RE.match(run_id) and ".." not in run_id:
+        return run_id
+    return ""
 
 STATUS_MAP = {
     "passed": "passed",
@@ -16,6 +30,19 @@ def normalize_status(status):
     if not status:
         return "failed"
     return STATUS_MAP.get(str(status).strip().lower(), "failed")
+
+
+def error_text(error_message):
+    """Return a step's ``result.error_message`` as one string.
+
+    behave's JSON formatter writes a multi-line message (every traceback) as a
+    list of lines and a one-line message as a plain string.
+    """
+    if not error_message:
+        return None
+    if isinstance(error_message, list):
+        return "\n".join(str(line) for line in error_message)
+    return str(error_message)
 
 def convert_behave_json(behave_json_path, *, run_id, caller_repo, slug, suite, timestamp):
     try:
@@ -67,7 +94,7 @@ def convert_behave_json(behave_json_path, *, run_id, caller_repo, slug, suite, t
                 step_logs_list.append(f"[{step_status.upper()}] {step_name}")
                 
                 # Check for error details
-                err_msg = step_result.get("error_message")
+                err_msg = error_text(step_result.get("error_message"))
                 if err_msg:
                     error_message = err_msg
                     step_logs_list.append(f"\u001b[1;31m[ERROR] {err_msg}\u001b[0m")
@@ -89,7 +116,7 @@ def convert_behave_json(behave_json_path, *, run_id, caller_repo, slug, suite, t
 
             tests.append({
                 "name": f"{feature_name} > {scenario_name}",
-                "status": "passed" if status == "passed" else "failed",
+                "status": status,
                 "duration_ms": duration_ms,
                 "error_message": error_message,
                 "logs": "\n".join(step_logs_list)
@@ -100,7 +127,7 @@ def convert_behave_json(behave_json_path, *, run_id, caller_repo, slug, suite, t
 
     # Assemble standard Dashboard run-ID.json payload
     return {
-        "id": run_id or f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M')}_{slug}",
+        "id": sanitize_run_id(run_id) or f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M')}_{slug}",
         "timestamp": timestamp or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "stream": stream,
         "flavor": flavor,
@@ -135,7 +162,7 @@ def convert_behave_json(behave_json_path, *, run_id, caller_repo, slug, suite, t
     }
 
 def main():
-    if len(sys.argv) < 7:
+    if len(sys.argv) < 8:
         print("Usage: convert_behave.py <behave_json> <run_id> <caller_repo> <slug> <suite> <timestamp> <output_dir>")
         sys.exit(1)
 

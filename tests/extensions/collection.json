@@ -1,0 +1,41 @@
+{
+  "just-perfection": {
+    "repository": "gnome-extensions-hive/just-perfection",
+    "upstream": "https://gitlab.gnome.org/jrahmatzadeh/just-perfection",
+    "branch": "main",
+    "metadata_path": "src/metadata.json",
+    "uuid": "just-perfection-desktop@just-perfection",
+    "schema": "org.gnome.shell.extensions.just-perfection",
+    "package_command": "bash scripts/build.sh",
+    "tag": "just_perfection"
+  },
+  "sjc-gold": {
+    "repository": "gnome-extensions-hive/sjc-gold-binhnguyensoft.com",
+    "upstream": "https://github.com/ngthanhbinh85/sjc-gold-binhnguyensoft.com",
+    "branch": "main",
+    "metadata_path": "metadata.json",
+    "uuid": "sjc-gold@binhnguyensoft.com",
+    "schema": "org.gnome.shell.extensions.sjc-gold-binhnguyensoft-com",
+    "package_sources": ["sjc_price.py"],
+    "tag": "sjc_gold"
+  },
+  "shade-inactive-windows": {
+    "repository": "gnome-extensions-hive/Shade-Inactive-Windows-Reborn",
+    "upstream": "https://github.com/ngthanhbinh85/shade-inactive-windows-reborn",
+    "branch": "main",
+    "metadata_path": "metadata.json",
+    "uuid": "shade-inactive-windows-reborn@binhnguyensoft.com",
+    "schema": "org.gnome.shell.extensions.shade-inactive-windows-reborn",
+    "tag": "shade_inactive_windows"
+  },
+  "stock-market": {
+    "repository": "gnome-extensions-hive/stock-market-binhnguyensoft.com",
+    "upstream": "https://github.com/ngthanhbinh85/stock-market-binhnguyensoft.com",
+    "branch": "main",
+    "metadata_path": "metadata.json",
+    "uuid": "stock-market@binhnguyensoft.com",
+    "schema": "org.gnome.shell.extensions.stock-market-binhnguyensoft-com",
+    "package_sources": ["stocks_fetch.py", "language.js"],
+    "tag": "stock_market"
+  }
+}

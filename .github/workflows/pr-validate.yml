@@ -22,6 +22,28 @@ permissions:
   contents: read
 
 jobs:
+  pinned-fetches:
+    name: Pinned fetches / Pinned fetches (fail)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the code under scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: source
+          persist-credentials: false
+
+      - name: Check out the shared gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: projectbluefin/actions
+          ref: 6453818f6279a2f2c1282919aad0009a88c01819 # v1
+          path: pinned-fetches-gate
+          persist-credentials: false
+
+      - name: Run the pinned-fetches gate
+        run: ./pinned-fetches-gate/scripts/check-pinned-fetches.sh --root source --mode fail --allowlist source/.github/pinned-fetches-allowlist.txt
+
   lint:
     name: Lint & syntax
     runs-on: ubuntu-latest
@@ -32,9 +54,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python 3.14
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       - name: Install linting tools
         run: pip install ruff
@@ -54,14 +76,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: Set up Python 3.14
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       - name: Check quarantine age
         run: python3 scripts/check_quarantine_age.py --grace-days 30
@@ -76,9 +98,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python 3.14
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
 
       - name: Check coverage snapshot is regenerated
         run: python3 scripts/update_coverage_snapshot.py --check

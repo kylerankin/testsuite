@@ -16,9 +16,58 @@ Three Fedora versions appear in this repo. They are not interchangeable.
 |---|---|---|
 | **`behave --dry-run` CI container** (`pr-validate.yml`) | `fedora:41` (pinned digest) | qecore/dogtail/GObject ABI target; PyGObject from Ubuntu breaks |
 | **Test runner image** (`container/Containerfile.runner`) | `fedora-minimal:latest` (rebuilt weekly) | Base for the runner container shipped to the VM |
-| **OS under test (gnomeos)** | `gnomeos-latest` (≈ Fedora 44 / GNOME 50) | `quay.io/gnome_infrastructure/gnome-build-meta` |
+| **OS under test (gnomeos)** | `gnomeos-latest` (current Fedora / GNOME release) | `quay.io/gnome_infrastructure/gnome-build-meta` |
+| **OS under test (extension-validation lane)** | `gnomeos-nightly` (digest resolved per run; tags expire after 2 weeks) | GNOME OS build for the developer extension validation lane (#908); provenance recorded in `results/guest-provenance.json` |
 | **OS under test (Bluefin)** | Fedora 41 based (stable/gts/lts) | Do NOT test against F42 — Bluefin does not ship it |
 
 **Never use F42**: no Bluefin or Bazzite image is based on Fedora 42.
+
+## GNOME 51 readiness (#826)
+
+`gnomeos-latest` is expected to roll from GNOME 50 to 51 **without any
+signal in this repo** (as of 2026-10-26 it has not moved since 2026-08-07, so it
+is not a GNOME 51 proxy). Validate against the `gnomeos-51` tag from
+`quay.io/gnome_infrastructure/gnome-build-meta` — there are no `51.rc` / `51.0`
+tags; pin its digest as described in the
+[GNOME 51 audit run target](../../../test-authoring/gnome/references/gnome-51-audit.md#run-target) —
+via a `manual.yml` run of the `vanilla-gnome` and `software` suites, then record
+the pass/fail deltas here and in the `vanilla-gnome` suite-map Notes.
+
+The `vanilla-gnome` suite carries an informational `ShellVersion` canary step
+(`GNOME Shell version is reported`) that prints the running
+`org.gnome.Shell ShellVersion` D-Bus property to the run log. It never gates the
+run — its only job is to give signal the moment `gnomeos-latest` flips to 51 so
+failures read as a version change rather than an unexplained regression. Update
+this row's GNOME version once the flip lands.
+
+## GNOME OS extension-validation lane (#908)
+
+The developer extension-validation lane is **designed** to boot a **pinned, reproducible**
+GNOME OS nightly and load the four `gnome-extensions-hive` extensions. Pinning removes the
+one moving part in the lane: the base image digest.
+
+> **No run has completed yet.** The lane is documented, not proven — do **not** claim
+> GNOME OS extension validation as done until a green run exists and its evidence is
+> attached. See
+> `docs/skills/ci-ops/e2e-workflow/references/gnome-extensions-validation.md` for the
+> open blockers.
+
+**Resolve the digest at dispatch time:** `gnomeos-*` digests expire two weeks after push, so
+no static pin is kept here. The lane resolves `gnomeos-nightly` to a digest per run and passes
+that `@sha256:…` reference — not the tag — to the `gnome-e2e` action's `image` input; see
+[gnomeos-guest-provenance.md](../../e2e-workflow/references/gnomeos-guest-provenance.md).
+
+Sibling tags for reference only: `gnomeos-51`, `gnomeos-50`, `gnomeos-latest`.
+Resolve the current nightly digest with:
+
+```bash
+skopeo inspect docker://quay.io/gnome_infrastructure/gnome-build-meta:gnomeos-nightly \
+  | jq -r '.Digest'
+```
+
+See `docs/skills/ci-ops/e2e-workflow/references/gnome-extensions-validation.md`
+for the guest inventory, the repeatable boot+load+run commands, and the mandatory
+service gate that fails closed for empty / all-skipped / undefined / hook-error /
+failed-boot / missing-result runs.
 
 ---

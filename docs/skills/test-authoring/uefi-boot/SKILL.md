@@ -1,16 +1,16 @@
 ---
 name: uefi-boot
 version: "1.0"
-last_updated: "2026-07-20"
+last_updated: "2026-10-28"
 id: uefi-boot
-one_line_purpose: Add or debug UEFI/OVMF reboot test paths.
+one_line_purpose: Add or debug UEFI/OVMF reboot tests and design desktop first-login qualification.
 entry_point: docs/skills/test-authoring/uefi-boot/SKILL.md
 category: test-authoring
 mcp_compliance_level: partial
 status: active
 dependencies: []
 tags: [uefi, ovmf, boot]
-description: "UEFI/OVMF reboot testing guidance. Load when adding or debugging UEFI boot paths in the e2e workflows."
+description: "UEFI/OVMF reboot testing and desktop first-login qualification guidance. Load when adding or debugging UEFI boot paths in e2e workflows, or designing firmware-boot and native GIS/GDM first-login qualification."
 metadata:
   type: pattern
   audience: agents
@@ -18,7 +18,7 @@ metadata:
 ---
 # UEFI Boot via OVMF + systemd-boot
 
-Load when: working on migration tests that require VM reboots, modifying the QEMU boot pipeline, or debugging UEFI/systemd-boot issues in CI.
+Load when: working on migration tests that require VM reboots, modifying the QEMU boot pipeline, debugging UEFI/systemd-boot issues in CI, or designing firmware-boot / desktop first-login qualification (see the [desktop qualification contract](references/desktop-first-login.md)).
 
 ## Why UEFI boot matters
 
@@ -105,16 +105,24 @@ This is the core mechanism that migration tests validate.
 - **Boot time is longer** — OVMF firmware initialization adds ~10-15s over direct kernel boot. The SSH wait deadline should be 600s for initial boot (vs 900s for direct boot, which needs extra time for different reasons).
 - **--bootloader flag requires bootc >= 0.1.13** — older images fail. Always probe `--help` before using.
 - **Service masking via kernel args is lost** — with direct boot, services are masked via `systemd.mask=...` in `-append`. With UEFI boot, masking must be done on-disk (symlink to `/dev/null` in the deployment's `/etc/systemd/system/`) — which `e2e.yml` already does.
-- **selinux=0 kernel arg is lost** — must be set in BLS entries or on-disk config instead. For migration tests with SELinux enforcing (Epic E04), this is actually correct behavior.
+- **SELinux stays enforcing** — `e2e.yml` no longer passes `selinux=0`, so direct and UEFI boot both run enforcing. Do not re-add the bypass in BLS entries or on-disk config; harness files are labeled before unmount instead. See [selinux-enforcing.md](../../ci-ops/e2e-workflow/references/selinux-enforcing.md).
 
 ## GRUB 2 vs systemd-boot Unified Virtualization Strategy
 
+This strategy is for migration testing. Installing a replacement bootloader
+does not qualify the boot path shipped to desktop users. For firmware boot
+and first-login claims, use the proposed
+[desktop qualification contract](references/desktop-first-login.md); its
+image eligibility and hosted evidence gates remain separate from smoke and
+migration results.
+
 Modern bootc/ostree images write Boot Loader Specification (BLS) entries (`/boot/loader/entries/*.conf`) regardless of whether the physical distribution targets GRUB 2 (like Bluefin / Bluefin LTS) or systemd-boot (like Dakota).
 
-**Core Virtualization Rule**: In the QEMU pipeline, always run loopback installation with `--bootloader systemd`. 
+For migration-only QEMU experiments, use loopback installation with
+`--bootloader systemd`.
 *   This installs systemd-boot onto the loopback disk's ESP for *all* image variants.
 *   systemd-boot reads the BLS entries and successfully bootc-upgrades, bootc-switches, and reboots inside the QEMU VM.
-*   By doing this, we avoid the intense partitioning, MBR-writing, and configuration complexities of GRUB 2 inside GHA while maintaining 100% functional test fidelity for OCI upgrades.
+*   This avoids GRUB installation complexity for the migration experiment. It does not prove that the image's supported GRUB installation or firmware handoff works.
 
 ## Spike workflow
 

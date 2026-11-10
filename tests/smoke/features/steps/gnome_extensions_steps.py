@@ -7,6 +7,7 @@ import time
 from time import sleep
 
 from behave import step
+from tests.shared.app_support import detached_launch_command
 from tests.shared.ssh_config import ssh_argv
 try:
     from dogtail import tree
@@ -154,6 +155,69 @@ def gnome_extension_is_enabled(context, uuid: str) -> None:
         "Expected state=1 (ENABLED)."
     )
 
+def _extension_installed(uuid: str) -> bool:
+    output, returncode, _ = _run_host(["gnome-extensions", "list"])
+    if returncode == 0 and uuid in [line.strip() for line in output.splitlines()]:
+        return True
+
+    out, rc, _ = _run_host(
+        "source /tmp/session.env 2>/dev/null; "
+        "gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell "
+        "--method org.gnome.Shell.Extensions.ListExtensions"
+    )
+    if rc == 0 and out and uuid in re.findall(r"'([^'@]+@[^']+)':", out):
+        return True
+
+    # Fallback to filesystem check in /usr/share/gnome-shell/extensions
+    _, dest_rc, _ = _run_host(f"test -d /usr/share/gnome-shell/extensions/{uuid}")
+    return dest_rc == 0
+
+
+@step('GNOME extension "{uuid}" is installed')
+def gnome_extension_is_installed(context, uuid: str) -> None:
+    assert _extension_installed(uuid), f"Extension {uuid!r} is not installed in the system"
+
+
+def _gnome_shell_major_version() -> int | None:
+    out, rc, _ = _run_host(
+        "source /tmp/session.env 2>/dev/null; "
+        "gnome-shell --version 2>/dev/null || mutter --version 2>/dev/null"
+    )
+    if rc != 0 or not out:
+        return None
+    match = re.search(r"(\d+)\.\d+", out)
+    return int(match.group(1)) if match else None
+
+
+@step('GNOME extension "{uuid}" is installed, otherwise skip on GNOME {min_major:d}+')
+def gnome_extension_installed_or_skip(context, uuid: str, min_major: int) -> None:
+    # For extensions an image deliberately stops shipping from a given GNOME
+    # release, e.g. Search Light, which is broken on GNOME 51. Absence on older
+    # (or undetectable) shells is still a failure, so regressions are caught.
+    if _extension_installed(uuid):
+        return
+    major = _gnome_shell_major_version()
+    if major is not None and major >= min_major:
+        context.scenario.skip(f"{uuid} is not shipped on GNOME {major}")
+        return
+    shell = f"GNOME {major}" if major is not None else "unknown GNOME version"
+    raise AssertionError(
+        f"Extension {uuid!r} is not installed on {shell} "
+        f"(only expected to be absent on GNOME {min_major}+)"
+    )
+
+
+@step('Dconf path "{path}" has value "{expected_value}"')
+def dconf_path_has_value(context, path: str, expected_value: str) -> None:
+    output, returncode, stderr = _run_host(["dconf", "read", path])
+    if returncode != 0:
+        output, returncode, stderr = _run_host(f"dconf read {path}")
+    assert returncode == 0, f"dconf read {path} failed: {stderr or output}"
+    actual = output.strip()
+    assert actual == expected_value, (
+        f"dconf key {path} mismatch: expected {expected_value!r}, got {actual!r}"
+    )
+
 
 def _extensions_app():
     last_error = None
@@ -256,10 +320,7 @@ def launch_extensions_preferences_via_command(context) -> None:
     if _IN_CONTAINER:
         # Inside the runner container the desktop file is absent from the container
         # filesystem — launch via SSH on the VM where the session is running.
-        cmd = (
-            "source /tmp/session.env 2>/dev/null; "
-            f"nohup gio launch {EXTENSIONS_DESKTOP_FILE} </dev/null &>/dev/null & disown"
-        )
+        cmd = detached_launch_command(f"gio launch {EXTENSIONS_DESKTOP_FILE}")
         result = subprocess.run(
             ssh_argv() + [cmd],
             capture_output=True, text=True, timeout=15,
