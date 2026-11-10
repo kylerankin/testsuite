@@ -426,6 +426,16 @@ jobs:
           DEPLOY=""
           for ATTEMPT in $(seq 1 "${BOOTC_INSTALL_ATTEMPTS}"); do
             echo "bootc install to-disk: attempt ${ATTEMPT}/${BOOTC_INSTALL_ATTEMPTS}"
+            # bootc 1.17 reads the new root partition's type from udev ~200 ms
+            # after sfdisk. On GitHub-hosted runners udev accumulates a backlog
+            # and has not always processed loopNp3 by then, so bootc aborts with
+            # "root partition 3 has type <none>" (Dakota, run 42611596358). The
+            # previous settle ran after the loopback was released, before the new
+            # partition existed, so it never helped. Trigger the block subsystem
+            # and settle here, before bootc creates the partition, so it is
+            # registered before bootc reads it.
+            sudo udevadm trigger --subsystem-match=block --action=change
+            sudo udevadm settle --timeout=30 || true
             set +e
             sudo podman run \
               --rm --privileged --pid=host \
@@ -469,7 +479,6 @@ jobs:
             for STALE_LOOP in $(sudo losetup -n -O NAME -j disk.raw); do
               sudo losetup -d "${STALE_LOOP}" || true
             done
-            sudo udevadm settle || true
           done
 
           if [[ -z "${DEPLOY}" ]]; then
